@@ -45,7 +45,7 @@ rm -f ~/.cache/neohive/ghcr-pat
 ## Requirements
 
 - Linux or macOS (on Windows: use WSL2)
-- Docker 20+ with BuildKit
+- Docker 20+
 - Port 3577 available on localhost
 
 ## MCP over HTTPS
@@ -56,6 +56,8 @@ endpoint with [mcp-remote](https://www.npmjs.com/package/mcp-remote):
 ```sh
 npx mcp-remote@latest http://localhost:3577/hiveminds/<id>/mcp
 ```
+
+(requires Node.js / npx on the client)
 
 The dashboard shows a copy-paste command for this. No server-side TLS
 configuration is needed.

@@ -137,32 +137,39 @@ fi
 if ! docker info >/dev/null 2>&1; then
   fail "Docker daemon is not running (or current user cannot access it). Start Docker and retry."
 fi
-DOCKER_VERSION="$(docker --version | awk '{print $3}' | tr -d ',')"
-info "Docker $DOCKER_VERSION - daemon reachable"
+DOCKER_VERSION="$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',' || true)"
+info "Docker ${DOCKER_VERSION:-(unknown version)} - daemon reachable"
 ok
 
 # [3/7] Backend detect
 step 3 "Detecting hardware backend..."
 if [ -n "${NEOHIVE_BACKEND:-}" ]; then
   BACKEND="$NEOHIVE_BACKEND"
-  info "Backend forced via NEOHIVE_BACKEND"
+  FORCED=1
 elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
   BACKEND=cuda
+  FORCED=0
   info "NVIDIA GPU detected"
 elif command -v rocm-smi >/dev/null 2>&1 && rocm-smi >/dev/null 2>&1; then
   BACKEND=rocm
+  FORCED=0
   info "AMD GPU (ROCm) detected"
 elif command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary >/dev/null 2>&1; then
   BACKEND=vulkan
+  FORCED=0
   info "Vulkan-capable GPU detected"
 else
   BACKEND=cpu
+  FORCED=0
   info "No GPU detected - using CPU"
 fi
 case "$BACKEND" in
   cpu|vulkan|cuda|rocm) ;;
   *) fail "Invalid BACKEND '$BACKEND' (expected cpu|vulkan|cuda|rocm)" ;;
 esac
+if [ "$FORCED" -eq 1 ]; then
+  info "Backend forced via NEOHIVE_BACKEND"
+fi
 ok "using '$BACKEND' backend"
 
 # [4/7] PAT resolution
@@ -176,7 +183,7 @@ resolve_pat() {
     printf '%s' "$NEOHIVE_PAT"
     return
   fi
-  if [ "${NEOHIVE_ROTATE_PAT:-}" != "1" ] && [ -f "$PAT_FILE" ]; then
+  if [ "${NEOHIVE_ROTATE_PAT:-}" != "1" ] && [ -s "$PAT_FILE" ]; then
     info "Using cached token at $PAT_FILE" >&2
     cat "$PAT_FILE"
     return
@@ -190,11 +197,17 @@ resolve_pat() {
   if [ -z "$PAT_INPUT" ]; then
     fail "Empty token."
   fi
-  mkdir -p "$CACHE_DIR"
-  chmod 700 "$CACHE_DIR"
-  printf '%s' "$PAT_INPUT" > "$PAT_FILE"
-  chmod 600 "$PAT_FILE"
-  info "Token cached to $PAT_FILE" >&2
+  if ! mkdir -p "$CACHE_DIR" 2>/dev/null; then
+    warn "Cannot create $CACHE_DIR - token will not be persisted"
+  else
+    chmod 700 "$CACHE_DIR"
+    if printf '%s' "$PAT_INPUT" > "$PAT_FILE" 2>/dev/null; then
+      chmod 600 "$PAT_FILE"
+      info "Token cached to $PAT_FILE" >&2
+    else
+      warn "Cannot write $PAT_FILE - token will not be persisted"
+    fi
+  fi
   printf '%s' "$PAT_INPUT"
 }
 PAT="$(resolve_pat)"
@@ -238,7 +251,8 @@ info "Container started on port $PORT"
 info "Waiting for /health (up to ${HEALTH_TIMEOUT_SECONDS}s)..."
 START=$(date +%s)
 HEALTHY=0
-for ((i=1; i<=HEALTH_TIMEOUT_SECONDS/2; i++)); do
+DEADLINE=$(( START + HEALTH_TIMEOUT_SECONDS ))
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   if curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1; then
     HEALTHY=1
     break

@@ -10,8 +10,10 @@ if [ -z "${NEOHIVE_PAT:-}" ]; then
   exit 1
 fi
 
+DOCKER_CONFIG="$(mktemp -d)"
+export DOCKER_CONFIG
 TMPCACHE="$(mktemp -d)"
-trap 'rm -rf "$TMPCACHE"; docker rm -f neohive 2>/dev/null || true' EXIT
+trap 'rm -rf "$TMPCACHE" "$DOCKER_CONFIG"; docker rm -f neohive 2>/dev/null || true' EXIT
 
 echo "-- Running installer via process substitution --"
 NEOHIVE_BACKEND=cpu \
@@ -20,11 +22,11 @@ XDG_CACHE_HOME="$TMPCACHE" \
 bash ./install.sh
 
 echo "-- Verifying /health --"
-curl -sf http://localhost:13577/health >/dev/null
+curl -sf --max-time 10 http://localhost:13577/health >/dev/null
 echo "   OK /health"
 
 echo "-- Verifying frontend HTML --"
-curl -sf http://localhost:13577/ | grep -q '<html' || {
+curl -sf --max-time 10 http://localhost:13577/ | grep -q '<html' || {
   echo "   FAIL frontend did not serve" >&2
   exit 1
 }
