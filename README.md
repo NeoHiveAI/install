@@ -7,8 +7,23 @@ from Logilica to pull it.
 
 ## Install
 
+**bash / zsh:**
+
 ```sh
 bash <(curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh)
+```
+
+**fish:**
+
+```fish
+bash (curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh | psub)
+```
+
+**Any shell (two-step):**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh -o /tmp/neohive-install.sh
+bash /tmp/neohive-install.sh
 ```
 
 You'll be prompted for your GHCR access token. After first install the token
