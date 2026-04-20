@@ -215,11 +215,11 @@ ok
 
 # [5/7] Authenticate
 step 5 "Authenticating to GHCR..."
-if ! printf '%s' "$PAT" | docker login ghcr.io -u _ --password-stdin >/dev/null 2>&1; then
+if ! printf '%s' "$PAT" | docker login ghcr.io -u neohive-service --password-stdin >/dev/null 2>&1; then
   rm -f "$PAT_FILE"
   fail "docker login ghcr.io failed. Your token may be revoked or expired. Re-run to enter a new one."
 fi
-ok "ghcr.io/_"
+ok "ghcr.io/neohive-service"
 
 # [6/7] Pull
 step 6 "Pulling container image..."
