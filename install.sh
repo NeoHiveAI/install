@@ -156,12 +156,123 @@ print_post_install() {
   printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
 }
 
+# -- Backend fallback chain -------------------------------------------
+# Each detected backend tries to pull its matching image; on a missing
+# tag we degrade along this chain and re-try. The CPU image is the
+# universal fallback - every release ships one. If the whole chain
+# misses on the floating tags (:rocm, :cuda, etc.) we enumerate
+# versioned tags (vX.Y.Z-<backend>) from the registry and repeat the
+# walk so a partial release (e.g. only CPU built at HEAD) still yields
+# a working install.
+backend_chain() {
+  case "$1" in
+    rocm)   printf 'rocm vulkan cpu' ;;
+    cuda)   printf 'cuda vulkan cpu' ;;
+    vulkan) printf 'vulkan cpu' ;;
+    cpu)    printf 'cpu' ;;
+  esac
+}
+
+# Try pulling a single tag. Shows pull progress so the user sees bytes
+# moving. Non-fatal: returns 1 on any failure so the caller can
+# continue down the chain. `set -e` does not abort inside an `if`
+# condition, which is how we guard the pull without disabling -e.
+try_pull_tag() {
+  local tag="$1"
+  info "pulling $IMAGE:$tag"
+  if docker pull "$IMAGE:$tag"; then
+    return 0
+  fi
+  return 1
+}
+
+# List versioned tags for a tag suffix (e.g. "cpu" or "cpu-arm64"),
+# newest first. Uses the Docker Registry v2 API on GHCR: first trade
+# the PAT for a short-lived bearer at /token, then list tags. Returns
+# empty on any registry or parse error - the caller treats that as
+# "no older versions" rather than aborting, so a flaky network at
+# list time still lets stage-1 floating tags succeed.
+list_versioned_tags() {
+  local suffix="$1"
+  local bearer tags_json
+  bearer="$(curl -fsSL \
+    -u "neohive-service:$PAT" \
+    "https://ghcr.io/token?scope=repository:neohiveai/neohive:pull" \
+    2>/dev/null | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+  [ -z "$bearer" ] && return 0
+  tags_json="$(curl -fsSL \
+    -H "Authorization: Bearer $bearer" \
+    "https://ghcr.io/v2/neohiveai/neohive/tags/list" 2>/dev/null)"
+  [ -z "$tags_json" ] && return 0
+  printf '%s' "$tags_json" \
+    | tr ',' '\n' \
+    | sed -n 's/.*"\(v[0-9][^"]*-'"$suffix"'\)".*/\1/p' \
+    | sort -rV
+}
+
+# Walks the fallback chain for $BACKEND, appending the given arch
+# suffix to every candidate. Stage 1 tries floating per-backend tags;
+# stage 2 enumerates versioned tags for the same backends. On success
+# sets RESOLVED_TAG and (on a backend downgrade) mutates BACKEND so
+# the device-flag switch in step 7 stays consistent with what was
+# actually pulled. On total miss leaves RESOLVED_TAG empty and
+# returns 1 so the caller can decide whether to try another suffix
+# (e.g. dropping "-arm64" to accept emulated x86 images).
+resolve_with_suffix() {
+  local suffix="$1"
+  local candidate vtag tag
+  for candidate in $(backend_chain "$BACKEND"); do
+    tag="${candidate}${suffix}"
+    if try_pull_tag "$tag"; then
+      if [ "$candidate" != "$BACKEND" ]; then
+        warn "'$BACKEND' image unavailable - falling back to '$candidate'"
+        BACKEND="$candidate"
+      fi
+      RESOLVED_TAG="$tag"
+      return 0
+    fi
+  done
+  # Stage 2: no floating tag resolved. Enumerate versioned tags
+  # (sorted newest-first) and pick the first that exists. This is the
+  # normal path for release tracks that publish only versioned tags -
+  # notably the arm64 track, which has no floating :cpu-arm64 - so we
+  # do not call the result "previous" unless the backend also changed.
+  info "no floating tag${suffix:+ (suffix $suffix)} - checking versioned tags"
+  for candidate in $(backend_chain "$BACKEND"); do
+    for vtag in $(list_versioned_tags "${candidate}${suffix}"); do
+      if try_pull_tag "$vtag"; then
+        if [ "$candidate" != "$BACKEND" ]; then
+          warn "'$BACKEND' image unavailable - falling back to '$candidate' at $vtag"
+          BACKEND="$candidate"
+        fi
+        RESOLVED_TAG="$vtag"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
 # ----------------------------------------------------------------------
 # Main flow
 # ----------------------------------------------------------------------
+# Library mode: when sourced with NEOHIVE_LIB_ONLY=1 (by the dry-run
+# harness, for instance), stop here so only the helpers above are
+# loaded. Guarded on BASH_SOURCE vs $0 so that directly executing the
+# script never triggers the early return.
+if [ "${BASH_SOURCE[0]}" != "${0}" ] && [ "${NEOHIVE_LIB_ONLY:-0}" = "1" ]; then
+  return 0
+fi
+
 print_banner
 
 # [1/7] Platform
+# ARCH_SUFFIX is appended to every image tag we try. Only arm64 gets a
+# suffix today - the NeoHive arm64 images (built from ../MemVec on an
+# Apple Silicon host) are tagged "<backend>-arm64" rather than being
+# bundled into a multi-arch manifest list, so the installer has to ask
+# for them by name. Leaving the suffix empty on x86 keeps the existing
+# tag names unchanged.
 step 1 "Detecting platform..."
 UNAME_S="$(uname -s)"
 UNAME_M="$(uname -m)"
@@ -169,6 +280,10 @@ case "$UNAME_S" in
   Linux)  info "Linux $UNAME_M" ;;
   Darwin) info "macOS $UNAME_M" ;;
   *) fail "Unsupported OS: $UNAME_S. Linux and macOS are supported. On Windows, install via WSL2." ;;
+esac
+case "$UNAME_M" in
+  arm64|aarch64) ARCH_SUFFIX="-arm64" ;;
+  *)             ARCH_SUFFIX="" ;;
 esac
 ok
 
@@ -185,10 +300,19 @@ info "Docker ${DOCKER_VERSION:-(unknown version)} - daemon reachable"
 ok
 
 # [3/7] Backend detect
+# On arm64 we skip GPU autodetection entirely: cuda/rocm/vulkan images
+# are not built for arm64 (the arm64 track is Apple Silicon optimized
+# and ships cpu-arm64 only). A forced NEOHIVE_BACKEND still wins - if
+# the user knows they have a Jetson or similar, let them try, and the
+# pull stage will fail loudly if no matching image exists.
 step 3 "Detecting hardware backend..."
 if [ -n "${NEOHIVE_BACKEND:-}" ]; then
   BACKEND="$NEOHIVE_BACKEND"
   FORCED=1
+elif [ -n "$ARCH_SUFFIX" ]; then
+  BACKEND=cpu
+  FORCED=0
+  info "arm64 host - using CPU backend (Apple Silicon optimized)"
 elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
   BACKEND=cuda
   FORCED=0
@@ -265,10 +389,41 @@ fi
 ok "ghcr.io/neohive-service"
 
 # [6/7] Pull
+# Resolution order:
+#   1. Native arch (ARCH_SUFFIX applied): floating chain, then
+#      versioned chain, via resolve_with_suffix.
+#   2. If arm64 and (1) found nothing, drop the suffix and retry the
+#      same walk - we pull x86 images under emulation. This is a known
+#      suboptimal outcome (slow, SIMD paths may break), so it emits a
+#      loud warning asking the user to file a bug with the NeoHive
+#      team. There is no third tier: if even x86 emulation misses,
+#      something is wrong with the PAT or the registry.
+# A forced backend (NEOHIVE_BACKEND set) skips fallback entirely and
+# fails on a single missed pull, so the override is never silently
+# downgraded.
 step 6 "Pulling container image..."
-info "$IMAGE:$BACKEND"
-docker pull "$IMAGE:$BACKEND"
-ok "image ready"
+RESOLVED_TAG=""
+if [ "$FORCED" -eq 1 ]; then
+  TAG="${BACKEND}${ARCH_SUFFIX}"
+  if try_pull_tag "$TAG"; then
+    RESOLVED_TAG="$TAG"
+  else
+    fail "image '$IMAGE:$TAG' not found and NEOHIVE_BACKEND is set - unset it to allow automatic fallback."
+  fi
+else
+  resolve_with_suffix "$ARCH_SUFFIX" || true
+  if [ -z "$RESOLVED_TAG" ] && [ -n "$ARCH_SUFFIX" ]; then
+    warn "no native arm64 image found - falling back to x86 images under emulation."
+    warn "emulated x86 is slow and can fail on SIMD code paths."
+    warn "please report this to the NeoHive team so a native arm64 build can be published."
+    ARCH_SUFFIX=""
+    resolve_with_suffix "" || true
+  fi
+fi
+if [ -z "$RESOLVED_TAG" ]; then
+  fail "no compatible image found on $IMAGE. Check your PAT's repo access and retry."
+fi
+ok "image ready ($RESOLVED_TAG)"
 
 # [7/7] Run
 step 7 "Starting NeoHive server..."
@@ -289,7 +444,7 @@ case "$BACKEND" in
   cuda)   RUN_ARGS+=(--gpus all) ;;
   rocm)   RUN_ARGS+=(--device /dev/kfd --device /dev/dri --group-add video --group-add render) ;;
 esac
-docker run "${RUN_ARGS[@]}" "$IMAGE:$BACKEND" >/dev/null
+docker run "${RUN_ARGS[@]}" "$IMAGE:$RESOLVED_TAG" >/dev/null
 info "Container started on port $PORT"
 info "Waiting for /health (up to ${HEALTH_TIMEOUT_SECONDS}s)..."
 START=$(date +%s)
