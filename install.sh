@@ -90,26 +90,69 @@ ok() {
 warn() { printf '      %sWARN%s  %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 fail() { printf '      %sFAIL%s  %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
+# -- LAN IP detection -------------------------------------------------
+# Best-effort: returns the primary non-loopback IPv4 so users installing
+# on a remote/shared box (not their laptop) know which address to open
+# in the browser. Empty string if detection fails - we just skip that
+# line rather than print a misleading value.
+detect_lan_ip() {
+  local ip=""
+  case "$(uname -s)" in
+    Darwin)
+      ip="$(ipconfig getifaddr en0 2>/dev/null || true)"
+      [ -z "$ip" ] && ip="$(ipconfig getifaddr en1 2>/dev/null || true)"
+      ;;
+    Linux)
+      if command -v hostname >/dev/null 2>&1; then
+        ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+      fi
+      if [ -z "$ip" ] && command -v ip >/dev/null 2>&1; then
+        ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)"
+      fi
+      ;;
+  esac
+  printf '%s' "$ip"
+}
+
 # -- Post-install summary ---------------------------------------------
+# The "Next steps" block is intentionally first and visually loudest -
+# the customer's next action is to open the dashboard and finish
+# onboarding in the browser, so everything else (MCP details, docker
+# commands, upgrade notes) is reference material beneath it.
 print_post_install() {
-  local line
+  local line lan_ip
   line=$(printf '%*s' 67 '' | tr ' ' '-')
+  lan_ip="$(detect_lan_ip)"
+
   printf '\n   %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
-  printf '   %sNeoHive is running.%s\n\n' "$C_BOLD" "$C_RESET"
-  printf '     Dashboard:  %shttp://localhost:%s%s\n' "$C_CYAN" "$PORT" "$C_RESET"
-  printf '     MCP:        %shttp://localhost:%s/hiveminds/<id>/mcp%s\n' "$C_CYAN" "$PORT" "$C_RESET"
+  printf '   %s%sNeoHive is running.%s\n\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
+
+  printf '   %s>> NEXT STEP: open the dashboard to finish onboarding <<%s\n\n' "$C_BOLD$C_VIOLET" "$C_RESET"
+  printf '     On this machine:    %shttp://localhost:%s%s\n' "$C_CYAN" "$PORT" "$C_RESET"
+  if [ -n "$lan_ip" ]; then
+    printf '     From another host:  %shttp://%s:%s%s\n' "$C_CYAN" "$lan_ip" "$PORT" "$C_RESET"
+  else
+    printf '     From another host:  %shttp://<this-machine-ip>:%s%s\n' "$C_CYAN" "$PORT" "$C_RESET"
+  fi
   printf '\n'
-  printf '   To find your <id>: open the dashboard, create a project,\n'
-  printf '   and copy the MCP command from the project detail page.\n\n'
-  printf '   To use the MCP over HTTPS, wrap the endpoint with the\n'
-  printf '   %smcp-remote%s npm package on the client side (see the in-app\n' "$C_BOLD" "$C_RESET"
-  printf '   MCP instructions for the copy-paste command).\n\n'
-  printf '   Useful:\n'
-  printf '     %sdocker logs -f %s%s\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
-  printf '     %sdocker restart %s%s\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
+  printf '   In the dashboard you will:\n'
+  printf '     1. Create your first project (a "hive").\n'
+  printf '     2. Copy the generated MCP command into your editor config.\n'
+  printf '     3. Start storing and recalling memories from any MCP client.\n\n'
+
+  printf '   %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
+  printf '   %sReference%s\n\n' "$C_BOLD" "$C_RESET"
+  printf '     MCP endpoint:   %shttp://localhost:%s/hiveminds/<id>/mcp%s\n' "$C_CYAN" "$PORT" "$C_RESET"
+  printf '                     (the <id> is shown on the project detail page)\n\n'
+  printf '     HTTPS/remote:   wrap the endpoint with the %smcp-remote%s npm\n' "$C_BOLD" "$C_RESET"
+  printf '                     package on the client (copy-paste command is\n'
+  printf '                     shown in the dashboard).\n\n'
+  printf '     Container ops:\n'
+  printf '       %sdocker logs -f %s%s\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
+  printf '       %sdocker restart %s%s\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
   printf '\n'
-  printf '   To upgrade: re-run this installer. Cached token is reused.\n'
-  printf '   To rotate the token: %sNEOHIVE_ROTATE_PAT=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
+  printf '     Upgrade:        re-run this installer (cached token is reused).\n'
+  printf '     Rotate token:   %sNEOHIVE_ROTATE_PAT=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
   printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
 }
 
