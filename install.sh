@@ -204,20 +204,28 @@ list_versioned_tags() {
     -H "Authorization: Bearer $bearer" \
     "https://ghcr.io/v2/neohiveai/neohive/tags/list" 2>/dev/null)"
   [ -z "$tags_json" ] && return 0
+  # Filter out pre-release tags (-rc, -beta, -alpha, -pre, -dev) so a
+  # versioned pre-release that leaked into GHCR cannot be promoted to
+  # a fresh customer via sort -rV. sort -V does not implement semver
+  # pre-release ordering - it would rank v1.4.5-rc1 above v1.4.4.
   printf '%s' "$tags_json" \
     | tr ',' '\n' \
     | sed -n 's/.*"\(v[0-9][^"]*-'"$suffix"'\)".*/\1/p' \
+    | grep -vE -- '-(rc|beta|alpha|pre|dev)' \
     | sort -rV
 }
 
-# Walks the fallback chain for $BACKEND, appending the given arch
-# suffix to every candidate. Stage 1 tries floating per-backend tags;
-# stage 2 enumerates versioned tags for the same backends. On success
-# sets RESOLVED_TAG and (on a backend downgrade) mutates BACKEND so
-# the device-flag switch in step 7 stays consistent with what was
-# actually pulled. On total miss leaves RESOLVED_TAG empty and
-# returns 1 so the caller can decide whether to try another suffix
-# (e.g. dropping "-arm64" to accept emulated x86 images).
+# Walks the fallback chain for $BACKEND. Stage 1 tries floating
+# per-backend tags (multi-arch manifest lists); stage 2 enumerates
+# versioned stable tags for the same backends if no floating tag
+# resolves. On success sets RESOLVED_TAG and (on a backend downgrade)
+# mutates BACKEND so the device-flag switch in step 7 stays consistent
+# with what was actually pulled. On total miss leaves RESOLVED_TAG
+# empty and returns 1.
+#
+# The suffix parameter is retained for forward compatibility but is
+# currently always empty - multi-arch manifests make per-arch suffixes
+# unnecessary.
 resolve_with_suffix() {
   local suffix="$1"
   local candidate vtag tag
@@ -233,10 +241,9 @@ resolve_with_suffix() {
     fi
   done
   # Stage 2: no floating tag resolved. Enumerate versioned tags
-  # (sorted newest-first) and pick the first that exists. This is the
-  # normal path for release tracks that publish only versioned tags -
-  # notably the arm64 track, which has no floating :cpu-arm64 - so we
-  # do not call the result "previous" unless the backend also changed.
+  # (newest stable first, pre-releases filtered) and pull the first
+  # that exists. This covers partial-release windows or registry
+  # flakiness at list time.
   info "no floating tag${suffix:+ (suffix $suffix)} - checking versioned tags"
   for candidate in $(backend_chain "$BACKEND"); do
     for vtag in $(list_versioned_tags "${candidate}${suffix}"); do
@@ -267,12 +274,11 @@ fi
 print_banner
 
 # [1/7] Platform
-# ARCH_SUFFIX is appended to every image tag we try. Only arm64 gets a
-# suffix today - the NeoHive arm64 images (built from ../MemVec on an
-# Apple Silicon host) are tagged "<backend>-arm64" rather than being
-# bundled into a multi-arch manifest list, so the installer has to ask
-# for them by name. Leaving the suffix empty on x86 keeps the existing
-# tag names unchanged.
+# NeoHive images are published as multi-arch manifest lists - `:cpu`,
+# `:latest`, and `:v<version>` carry both linux/amd64 and linux/arm64
+# layers, and `docker pull` selects the matching layer automatically.
+# The installer does not append an arch suffix to tags; the manifest
+# list handles arch selection.
 step 1 "Detecting platform..."
 UNAME_S="$(uname -s)"
 UNAME_M="$(uname -m)"
@@ -280,10 +286,6 @@ case "$UNAME_S" in
   Linux)  info "Linux $UNAME_M" ;;
   Darwin) info "macOS $UNAME_M" ;;
   *) fail "Unsupported OS: $UNAME_S. Linux and macOS are supported. On Windows, install via WSL2." ;;
-esac
-case "$UNAME_M" in
-  arm64|aarch64) ARCH_SUFFIX="-arm64" ;;
-  *)             ARCH_SUFFIX="" ;;
 esac
 ok
 
@@ -300,16 +302,16 @@ info "Docker ${DOCKER_VERSION:-(unknown version)} - daemon reachable"
 ok
 
 # [3/7] Backend detect
-# On arm64 we skip GPU autodetection entirely: cuda/rocm/vulkan images
-# are not built for arm64 (the arm64 track is Apple Silicon optimized
-# and ships cpu-arm64 only). A forced NEOHIVE_BACKEND still wins - if
+# On arm64 we skip GPU autodetection entirely: the release pipeline only
+# builds cpu for arm64 (cuda/rocm need NVIDIA/AMD data-centre silicon,
+# vulkan is irrelevant on Mac). A forced NEOHIVE_BACKEND still wins - if
 # the user knows they have a Jetson or similar, let them try, and the
 # pull stage will fail loudly if no matching image exists.
 step 3 "Detecting hardware backend..."
 if [ -n "${NEOHIVE_BACKEND:-}" ]; then
   BACKEND="$NEOHIVE_BACKEND"
   FORCED=1
-elif [ -n "$ARCH_SUFFIX" ]; then
+elif [ "$UNAME_M" = "arm64" ] || [ "$UNAME_M" = "aarch64" ]; then
   BACKEND=cpu
   FORCED=0
   info "arm64 host - using CPU backend (Apple Silicon optimized)"
@@ -390,35 +392,27 @@ ok "ghcr.io/neohive-service"
 
 # [6/7] Pull
 # Resolution order:
-#   1. Native arch (ARCH_SUFFIX applied): floating chain, then
-#      versioned chain, via resolve_with_suffix.
-#   2. If arm64 and (1) found nothing, drop the suffix and retry the
-#      same walk - we pull x86 images under emulation. This is a known
-#      suboptimal outcome (slow, SIMD paths may break), so it emits a
-#      loud warning asking the user to file a bug with the NeoHive
-#      team. There is no third tier: if even x86 emulation misses,
-#      something is wrong with the PAT or the registry.
+#   1. Floating per-backend tag (:cpu, :cuda, :vulkan, :rocm) via the
+#      fallback chain in resolve_with_suffix - each is a multi-arch
+#      manifest list, so docker pull picks the right arch layer.
+#   2. If no floating tag resolves (partial release, floating tag
+#      missing for the detected backend, etc.), enumerate versioned
+#      tags (v<X.Y.Z>-<backend>) and pull the newest stable. Pre-release
+#      tags are filtered out in list_versioned_tags so internal RCs
+#      cannot reach fresh customers.
 # A forced backend (NEOHIVE_BACKEND set) skips fallback entirely and
 # fails on a single missed pull, so the override is never silently
 # downgraded.
 step 6 "Pulling container image..."
 RESOLVED_TAG=""
 if [ "$FORCED" -eq 1 ]; then
-  TAG="${BACKEND}${ARCH_SUFFIX}"
-  if try_pull_tag "$TAG"; then
-    RESOLVED_TAG="$TAG"
+  if try_pull_tag "$BACKEND"; then
+    RESOLVED_TAG="$BACKEND"
   else
-    fail "image '$IMAGE:$TAG' not found and NEOHIVE_BACKEND is set - unset it to allow automatic fallback."
+    fail "image '$IMAGE:$BACKEND' not found and NEOHIVE_BACKEND is set - unset it to allow automatic fallback."
   fi
 else
-  resolve_with_suffix "$ARCH_SUFFIX" || true
-  if [ -z "$RESOLVED_TAG" ] && [ -n "$ARCH_SUFFIX" ]; then
-    warn "no native arm64 image found - falling back to x86 images under emulation."
-    warn "emulated x86 is slow and can fail on SIMD code paths."
-    warn "please report this to the NeoHive team so a native arm64 build can be published."
-    ARCH_SUFFIX=""
-    resolve_with_suffix "" || true
-  fi
+  resolve_with_suffix "" || true
 fi
 if [ -z "$RESOLVED_TAG" ]; then
   fail "no compatible image found on $IMAGE. Check your PAT's repo access and retry."

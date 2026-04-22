@@ -56,10 +56,6 @@ printf '%s' "$PAT" | docker login ghcr.io -u neohive-service --password-stdin >/
 
 # Scenario inputs.
 ARCH="${ARCH:-$(uname -m)}"
-case "$ARCH" in
-  arm64|aarch64) ARCH_SUFFIX="-arm64" ;;
-  *)             ARCH_SUFFIX="" ;;
-esac
 BACKEND="${BACKEND:-cpu}"
 FORCED="${FORCED:-0}"
 
@@ -71,22 +67,16 @@ esac
 printf '\n%s=== Dry-run: BACKEND=%s ARCH=%s FORCED=%s ===%s\n\n' \
   "$C_BOLD" "$BACKEND" "$ARCH" "$FORCED" "$C_RESET"
 
-# Mirror step 6's dispatch. Kept inline rather than factored into a
-# shared function because it is only three branches and the test
-# harness wants each branch visible for debugging.
+# Mirror step 6's dispatch. Multi-arch manifest lists mean we do not
+# suffix tags per architecture - docker pull selects the right layer
+# from the manifest automatically.
 RESOLVED_TAG=""
 if [ "$FORCED" -eq 1 ]; then
-  TAG="${BACKEND}${ARCH_SUFFIX}"
-  if try_pull_tag "$TAG"; then
-    RESOLVED_TAG="$TAG"
+  if try_pull_tag "$BACKEND"; then
+    RESOLVED_TAG="$BACKEND"
   fi
 else
-  resolve_with_suffix "$ARCH_SUFFIX" || true
-  if [ -z "$RESOLVED_TAG" ] && [ -n "$ARCH_SUFFIX" ]; then
-    warn "no native $ARCH_SUFFIX image - would fall back to x86 under emulation"
-    ARCH_SUFFIX=""
-    resolve_with_suffix "" || true
-  fi
+  resolve_with_suffix "" || true
 fi
 
 printf '\n'
