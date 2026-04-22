@@ -316,9 +316,30 @@ elif [ "$UNAME_M" = "arm64" ] || [ "$UNAME_M" = "aarch64" ]; then
   FORCED=0
   info "arm64 host - using CPU backend (Apple Silicon optimized)"
 elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-  BACKEND=cuda
-  FORCED=0
-  info "NVIDIA GPU detected"
+  info "NVIDIA GPU detected - probing container runtime..."
+  # nvidia-smi on the host is not enough. The :cuda image ships no CUDA
+  # libs of its own - it depends on NVIDIA Container Toolkit to bind-mount
+  # libcuda.so and the CUDA runtime at container start (via --gpus all).
+  # On WSL2 / Docker Desktop the Windows driver exposes nvidia-smi through
+  # passthrough, but the container toolkit is a separate install that is
+  # easy to miss. Without it, --gpus all "succeeds" but libcuda.so never
+  # reaches the container, and the Rust embedder dies on LlamaBackend::init.
+  # Probe with a tiny CUDA base image that is cheap to pull; fall back to
+  # cpu on failure so the user gets a working install instead of a broken
+  # cuda daemon.
+  if docker run --rm --gpus all \
+       nvidia/cuda:12.2.2-base-ubuntu22.04 nvidia-smi -L \
+       >/dev/null 2>&1; then
+    BACKEND=cuda
+    FORCED=0
+    info "NVIDIA Container Toolkit working - using CUDA backend"
+  else
+    BACKEND=cpu
+    FORCED=0
+    warn "NVIDIA Container Toolkit probe failed - falling back to CPU backend."
+    warn "To enable CUDA: install nvidia-container-toolkit and restart Docker,"
+    warn "then re-run this installer or set NEOHIVE_BACKEND=cuda to force."
+  fi
 elif command -v rocm-smi >/dev/null 2>&1 && rocm-smi >/dev/null 2>&1; then
   BACKEND=rocm
   FORCED=0
