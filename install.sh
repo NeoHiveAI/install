@@ -27,10 +27,22 @@ VOLUME_NAME="neohive-data"
 DEFAULT_PORT=3577
 HEALTH_TIMEOUT_SECONDS=60
 TOTAL_STEPS=7
+MAX_LOGIN_ATTEMPTS=3
+
+# CHANGELOG.md in this repo, surfaced post-install on upgrades.
+CHANGELOG_RAW_URL="https://raw.githubusercontent.com/NeoHiveAI/install/main/CHANGELOG.md"
+CHANGELOG_VIEW_URL="https://github.com/NeoHiveAI/install/blob/main/CHANGELOG.md"
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/neohive"
 PAT_FILE="$CACHE_DIR/ghcr-pat"
 PORT="${NEOHIVE_PORT:-$DEFAULT_PORT}"
+
+# Detected once near boot, before docker rm/run rewrite the world.
+# Presence of the data volume is a more durable signal than the container
+# being alive: a previous `docker rm` would have removed the container
+# but the volume persists across reinstalls.
+RELEASE_VERSION=""
+RELEASE_OVERVIEW=""
 
 # -- Colour palette ----------------------------------------------------
 # 256-colour ANSI. Terminals without 256-colour support fall through
@@ -152,6 +164,92 @@ print_post_install() {
   printf '       %sdocker restart %s%s\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
   printf '\n'
   printf '     Upgrade:        re-run this installer (cached token is reused).\n'
+  printf '     Rotate token:   %sNEOHIVE_ROTATE_PAT=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
+  printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
+}
+
+# -- Release notes (used on upgrade) ----------------------------------
+# Best-effort fetch of CHANGELOG.md from this repo and extraction of the
+# first version section's "### Release overview" body. On any failure
+# (no network, 404, malformed file) we silently fall back to the generic
+# post-install summary so a flaky fetch never breaks an upgrade.
+fetch_latest_release_notes() {
+  local md
+  md="$(curl -fsSL --max-time 10 "$CHANGELOG_RAW_URL" 2>/dev/null)" || return 1
+  [ -n "$md" ] || return 1
+  # awk parses the FIRST `## v?X.Y.Z` section and extracts the body of
+  # the `### Release overview` block within it. Stops at the next ## or
+  # ### heading so we capture exactly one overview.
+  local parsed
+  parsed="$(
+    printf '%s\n' "$md" | awk '
+      BEGIN { ver = ""; in_ovr = 0 }
+      /^## v?[0-9]+\.[0-9]+\.[0-9]+/ {
+        if (ver != "") exit
+        if (match($0, /v?[0-9]+\.[0-9]+\.[0-9]+/)) {
+          ver = substr($0, RSTART, RLENGTH)
+        }
+        print "VERSION:" ver
+        next
+      }
+      /^### Release overview/ { in_ovr = 1; next }
+      /^(## |### )/ { if (in_ovr) in_ovr = 0 }
+      in_ovr { print "BODY:" $0 }
+    '
+  )"
+  [ -n "$parsed" ] || return 1
+  RELEASE_VERSION="$(printf '%s\n' "$parsed" | sed -n 's/^VERSION://p' | head -n1)"
+  RELEASE_OVERVIEW="$(printf '%s\n' "$parsed" | sed -n 's/^BODY://p')"
+  # Trim leading and trailing blank lines from the overview body.
+  RELEASE_OVERVIEW="$(printf '%s' "$RELEASE_OVERVIEW" | awk 'NF { found=1 } found' | sed -e :a -e '/^$/{$d;N;ba' -e '}')"
+  [ -n "$RELEASE_VERSION" ] && [ -n "$RELEASE_OVERVIEW" ]
+}
+
+# Post-install summary variant for upgrades. Replaces the "Next step:
+# create your first project" block (wrong for an upgrade) with release
+# notes for the version that was just pulled, plus a link to the full
+# changelog. Falls back to the generic summary if release notes are
+# unavailable.
+print_post_install_update() {
+  if ! fetch_latest_release_notes; then
+    # CHANGELOG fetch failed - still announce the upgrade but skip notes.
+    local line lan_ip
+    line=$(printf '%*s' 67 '' | tr ' ' '-')
+    lan_ip="$(detect_lan_ip)"
+    printf '\n   %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
+    printf '   %s%sNeoHive updated.%s\n\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
+    printf '     %sRelease notes unavailable (fetch failed). See:%s\n' "$C_DIM" "$C_RESET"
+    printf '     %s%s%s\n\n' "$C_CYAN" "$CHANGELOG_VIEW_URL" "$C_RESET"
+    printf '     Dashboard:  %shttp://localhost:%s%s\n' "$C_CYAN" "$PORT" "$C_RESET"
+    [ -n "$lan_ip" ] && printf '     LAN:        %shttp://%s:%s%s\n' "$C_CYAN" "$lan_ip" "$PORT" "$C_RESET"
+    printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
+    return
+  fi
+
+  local line lan_ip
+  line=$(printf '%*s' 67 '' | tr ' ' '-')
+  lan_ip="$(detect_lan_ip)"
+
+  printf '\n   %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
+  printf '   %s%sNeoHive updated to %s.%s\n\n' "$C_BOLD" "$C_GREEN" "$RELEASE_VERSION" "$C_RESET"
+
+  printf '   %s%sWhat'\''s new%s\n\n' "$C_BOLD" "$C_VIOLET" "$C_RESET"
+  # Indent each overview line by 5 spaces so it sits inside the framed block.
+  printf '%s\n' "$RELEASE_OVERVIEW" | sed 's/^/     /'
+  printf '\n'
+  printf '     Full changelog: %s%s%s\n\n' "$C_CYAN" "$CHANGELOG_VIEW_URL" "$C_RESET"
+
+  printf '   Dashboard:  %shttp://localhost:%s%s\n' "$C_CYAN" "$PORT" "$C_RESET"
+  if [ -n "$lan_ip" ]; then
+    printf '   LAN:        %shttp://%s:%s%s\n' "$C_CYAN" "$lan_ip" "$PORT" "$C_RESET"
+  fi
+  printf '\n'
+
+  printf '   %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
+  printf '   %sReference%s\n\n' "$C_BOLD" "$C_RESET"
+  printf '     Container ops:\n'
+  printf '       %sdocker logs -f %s%s\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
+  printf '       %sdocker restart %s%s\n\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
   printf '     Rotate token:   %sNEOHIVE_ROTATE_PAT=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
   printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
 }
@@ -404,11 +502,32 @@ PAT="$(resolve_pat)"
 ok
 
 # [5/7] Authenticate
+# On rejection we clear the cached token and re-prompt up to
+# MAX_LOGIN_ATTEMPTS times. If NEOHIVE_PAT was set explicitly we cannot
+# re-prompt over an env-driven value, so we fail fast with the specific
+# reason. Non-TTY runs likewise cannot recover - they must pass a valid
+# NEOHIVE_PAT and retry.
 step 5 "Authenticating to GHCR..."
-if ! printf '%s' "$PAT" | docker login ghcr.io -u neohive-service --password-stdin >/dev/null 2>&1; then
+LOGIN_ATTEMPT=0
+while :; do
+  LOGIN_ATTEMPT=$((LOGIN_ATTEMPT + 1))
+  if printf '%s' "$PAT" | docker login ghcr.io -u neohive-service --password-stdin >/dev/null 2>&1; then
+    break
+  fi
   rm -f "$PAT_FILE"
-  fail "docker login ghcr.io failed. Your token may be revoked or expired. Re-run to enter a new one."
-fi
+  if [ -n "${NEOHIVE_PAT:-}" ]; then
+    fail "docker login ghcr.io rejected the token from NEOHIVE_PAT. Check it has 'read:packages' scope on $IMAGE."
+  fi
+  if [ "$LOGIN_ATTEMPT" -ge "$MAX_LOGIN_ATTEMPTS" ]; then
+    fail "docker login ghcr.io failed after $MAX_LOGIN_ATTEMPTS attempts. The token may be revoked or lack 'read:packages' scope on $IMAGE."
+  fi
+  if [ ! -t 0 ]; then
+    fail "docker login ghcr.io failed and stdin is not a TTY (cannot re-prompt). Pass a valid NEOHIVE_PAT and retry."
+  fi
+  warn "GHCR rejected that token. Let's try a different one (attempt $((LOGIN_ATTEMPT + 1)) of $MAX_LOGIN_ATTEMPTS)."
+  NEOHIVE_ROTATE_PAT=1
+  PAT="$(resolve_pat)"
+done
 ok "ghcr.io/neohive-service"
 
 # [6/7] Pull
@@ -441,6 +560,15 @@ fi
 ok "image ready ($RESOLVED_TAG)"
 
 # [7/7] Run
+# Detect upgrade vs fresh install BEFORE we tear down the existing
+# container. Presence of the data volume is the durable signal - the
+# container may have been `docker rm`'d but a returning user's data
+# survives in the volume, and we still want to greet them with release
+# notes rather than the "create your first project" walkthrough.
+IS_UPDATE=0
+if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
+  IS_UPDATE=1
+fi
 step 7 "Starting NeoHive server..."
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   info "Stopping existing container for upgrade..."
@@ -480,4 +608,8 @@ fi
 ELAPSED=$(( $(date +%s) - START ))
 ok "ready in ${ELAPSED}s"
 
-print_post_install
+if [ "$IS_UPDATE" -eq 1 ]; then
+  print_post_install_update
+else
+  print_post_install
+fi
