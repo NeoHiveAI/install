@@ -10,6 +10,7 @@
 #   NEOHIVE_PORT       - port to publish (default: 3577)
 #   NEOHIVE_PAT        - GHCR token; required when stdin is not a TTY
 #   NEOHIVE_ROTATE_PAT - set to 1 to force re-prompt even if cached PAT exists
+#   NEOHIVE_UPDATE_REPO- override the GHCR repo for in-app update checks
 #
 # The PAT is cached at $XDG_CACHE_HOME/neohive/ghcr-pat (or ~/.cache/neohive/
 # if XDG is unset) with mode 0600 so the customer does not re-paste on
@@ -581,7 +582,16 @@ RUN_ARGS=(
   -v "$VOLUME_NAME:/app/data"
   -p "$PORT:3577"
   -e NEOHIVE_LICENSE_ENABLED=false
+  # Forward the GHCR PAT so the server's in-app update check can query
+  # the same registry we just pulled from. Without this the banner stays
+  # blank with "NEOHIVE_PAT not set". The host-side `docker login` only
+  # authenticates the pull; the daemon does not pass that into the
+  # container.
+  -e "NEOHIVE_PAT=$PAT"
 )
+if [ -n "${NEOHIVE_UPDATE_REPO:-}" ]; then
+  RUN_ARGS+=(-e "NEOHIVE_UPDATE_REPO=$NEOHIVE_UPDATE_REPO")
+fi
 case "$BACKEND" in
   vulkan) RUN_ARGS+=(--device /dev/dri) ;;
   cuda)   RUN_ARGS+=(--gpus all) ;;
