@@ -30,6 +30,16 @@ HEALTH_TIMEOUT_SECONDS=60
 TOTAL_STEPS=7
 MAX_LOGIN_ATTEMPTS=3
 
+# Pre-release tag pattern. Applied at every point the installer can
+# resolve a versioned tag - at registry enumeration time
+# (list_versioned_tags) and at pull time (try_pull_tag). Defining it
+# once and reusing it makes pre-release rejection an invariant of the
+# resolver: a future code path that hand-rolls version tags cannot
+# bypass the filter by skipping list_versioned_tags. This is what
+# lets the upstream release pipeline publish arm64 RC builds
+# (v<X>-cpu-arm64) without leaking them to Apple Silicon customers.
+PRERELEASE_TAG_PATTERN='-(rc|beta|alpha|pre|dev)'
+
 # CHANGELOG.md in this repo, surfaced post-install on upgrades.
 CHANGELOG_RAW_URL="https://raw.githubusercontent.com/NeoHiveAI/install/main/CHANGELOG.md"
 CHANGELOG_VIEW_URL="https://github.com/NeoHiveAI/install/blob/main/CHANGELOG.md"
@@ -278,6 +288,14 @@ backend_chain() {
 # condition, which is how we guard the pull without disabling -e.
 try_pull_tag() {
   local tag="$1"
+  # Defense in depth: refuse pre-release tags however the caller
+  # obtained them. list_versioned_tags filters at enumeration; this
+  # guard ensures a code path added later that hands a versioned tag
+  # straight to the puller cannot bypass that filter.
+  if printf '%s' "$tag" | grep -qE -- "$PRERELEASE_TAG_PATTERN"; then
+    info "refusing pre-release tag $tag"
+    return 1
+  fi
   info "pulling $IMAGE:$tag"
   if docker pull "$IMAGE:$tag"; then
     return 0
@@ -303,14 +321,15 @@ list_versioned_tags() {
     -H "Authorization: Bearer $bearer" \
     "https://ghcr.io/v2/neohiveai/neohive/tags/list" 2>/dev/null)"
   [ -z "$tags_json" ] && return 0
-  # Filter out pre-release tags (-rc, -beta, -alpha, -pre, -dev) so a
-  # versioned pre-release that leaked into GHCR cannot be promoted to
-  # a fresh customer via sort -rV. sort -V does not implement semver
-  # pre-release ordering - it would rank v1.4.5-rc1 above v1.4.4.
+  # Filter out pre-release tags so a versioned pre-release that leaked
+  # into GHCR cannot be promoted to a fresh customer via sort -rV.
+  # sort -V does not implement semver pre-release ordering - it would
+  # rank v1.4.5-rc1 above v1.4.4. See PRERELEASE_TAG_PATTERN at the
+  # top of this file for the canonical pattern.
   printf '%s' "$tags_json" \
     | tr ',' '\n' \
     | sed -n 's/.*"\(v[0-9][^"]*-'"$suffix"'\)".*/\1/p' \
-    | grep -vE -- '-(rc|beta|alpha|pre|dev)' \
+    | grep -vE -- "$PRERELEASE_TAG_PATTERN" \
     | sort -rV
 }
 
