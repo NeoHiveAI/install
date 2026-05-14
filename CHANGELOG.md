@@ -8,6 +8,19 @@ is reference material for users who want the details.
 The format follows [Keep a Changelog](https://keepachangelog.com/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## v1.4.9 — 2026-05-14
+
+### Release overview
+Adds a `NEOHIVE_CHUNKER_TIMEOUT_MS` environment override so ingestion of
+very large PDFs through the docling bridge no longer times out at the
+default 30-second per-chunk budget. Forwarded to the container as
+`MEMVEC_CHUNKER_TIMEOUT_MS`. A 900-page document typically needs ~20
+minutes (`NEOHIVE_CHUNKER_TIMEOUT_MS=1200000`).
+
+### Added
+- `NEOHIVE_CHUNKER_TIMEOUT_MS` env override on the installer, validated
+  as a positive integer and forwarded to the container
+
 ## v1.4.8 — 2026-04-23
 
 ### Release overview

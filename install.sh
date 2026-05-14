@@ -6,11 +6,16 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh)
 #
 # Environment overrides (all optional):
-#   NEOHIVE_BACKEND    - force backend: cpu|vulkan|cuda|rocm (default: autodetect)
-#   NEOHIVE_PORT       - port to publish (default: 3577)
-#   NEOHIVE_PAT        - GHCR token; required when stdin is not a TTY
-#   NEOHIVE_ROTATE_PAT - set to 1 to force re-prompt even if cached PAT exists
-#   NEOHIVE_UPDATE_REPO- override the GHCR repo for in-app update checks
+#   NEOHIVE_BACKEND            - force backend: cpu|vulkan|cuda|rocm (default: autodetect)
+#   NEOHIVE_PORT               - port to publish (default: 3577)
+#   NEOHIVE_PAT                - GHCR token; required when stdin is not a TTY
+#   NEOHIVE_ROTATE_PAT         - set to 1 to force re-prompt even if cached PAT exists
+#   NEOHIVE_UPDATE_REPO        - override the GHCR repo for in-app update checks
+#   NEOHIVE_CHUNKER_TIMEOUT_MS - per-call chunker subprocess timeout in ms (default
+#                                30000). Raise this when ingesting very large PDFs
+#                                through the docling bridge - a 900-page document
+#                                can need 15-20 minutes. Example: 1200000 (20 min).
+#                                Forwarded to the container as MEMVEC_CHUNKER_TIMEOUT_MS.
 #
 # The PAT is cached at $XDG_CACHE_HOME/neohive/ghcr-pat (or ~/.cache/neohive/
 # if XDG is unset) with mode 0600 so the customer does not re-paste on
@@ -610,6 +615,17 @@ RUN_ARGS=(
 )
 if [ -n "${NEOHIVE_UPDATE_REPO:-}" ]; then
   RUN_ARGS+=(-e "NEOHIVE_UPDATE_REPO=$NEOHIVE_UPDATE_REPO")
+fi
+# Optional override for the docling/chunker subprocess timeout. Forwarded
+# under the backend's internal name (MEMVEC_CHUNKER_TIMEOUT_MS) so users
+# only learn the NEOHIVE_-prefixed knob. Default in the backend is 30s,
+# which is too short for very large PDFs - bump via this override.
+if [ -n "${NEOHIVE_CHUNKER_TIMEOUT_MS:-}" ]; then
+  if ! printf '%s' "$NEOHIVE_CHUNKER_TIMEOUT_MS" | grep -qE '^[1-9][0-9]*$'; then
+    fail "NEOHIVE_CHUNKER_TIMEOUT_MS must be a positive integer (milliseconds). Got: '$NEOHIVE_CHUNKER_TIMEOUT_MS'"
+  fi
+  info "chunker timeout override: ${NEOHIVE_CHUNKER_TIMEOUT_MS}ms"
+  RUN_ARGS+=(-e "MEMVEC_CHUNKER_TIMEOUT_MS=$NEOHIVE_CHUNKER_TIMEOUT_MS")
 fi
 case "$BACKEND" in
   vulkan) RUN_ARGS+=(--device /dev/dri) ;;
