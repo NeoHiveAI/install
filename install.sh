@@ -11,11 +11,20 @@
 #   NEOHIVE_PAT                - GHCR token; required when stdin is not a TTY
 #   NEOHIVE_ROTATE_PAT         - set to 1 to force re-prompt even if cached PAT exists
 #   NEOHIVE_UPDATE_REPO        - override the GHCR repo for in-app update checks
-#   NEOHIVE_CHUNKER_TIMEOUT_MS - per-call chunker subprocess timeout in ms (default
-#                                30000). Raise this when ingesting very large PDFs
-#                                through the docling bridge - a 900-page document
-#                                can need 15-20 minutes. Example: 1200000 (20 min).
-#                                Forwarded to the container as MEMVEC_CHUNKER_TIMEOUT_MS.
+#   NEOHIVE_PDF_BRIDGE_TIMEOUT_MS  - docling PDF bridge per-document timeout in ms
+#                                    (default 300000 = 5 min). Raise this for very
+#                                    large PDFs - a 900-page document can need
+#                                    25-30 minutes. Example: 1800000 (30 min).
+#                                    Forwarded as MEMVEC_PDF_BRIDGE_TIMEOUT_MS.
+#   NEOHIVE_PDF_WARMUP_TIMEOUT_MS  - docling model-warmup timeout in ms (default
+#                                    300000 = 5 min). Raise this on first-boot
+#                                    hosts that pay a slow HuggingFace download.
+#                                    Forwarded as MEMVEC_PDF_WARMUP_TIMEOUT_MS.
+#   NEOHIVE_CHUNKER_TIMEOUT_MS     - markdown/code chunker subprocess timeout in
+#                                    ms (default 30000). Distinct from the PDF
+#                                    bridge timeout above - this gates the
+#                                    chonkie/Rust splitter, not docling.
+#                                    Forwarded as MEMVEC_CHUNKER_TIMEOUT_MS.
 #
 # The PAT is cached at $XDG_CACHE_HOME/neohive/ghcr-pat (or ~/.cache/neohive/
 # if XDG is unset) with mode 0600 so the customer does not re-paste on
@@ -616,17 +625,25 @@ RUN_ARGS=(
 if [ -n "${NEOHIVE_UPDATE_REPO:-}" ]; then
   RUN_ARGS+=(-e "NEOHIVE_UPDATE_REPO=$NEOHIVE_UPDATE_REPO")
 fi
-# Optional override for the docling/chunker subprocess timeout. Forwarded
-# under the backend's internal name (MEMVEC_CHUNKER_TIMEOUT_MS) so users
-# only learn the NEOHIVE_-prefixed knob. Default in the backend is 30s,
-# which is too short for very large PDFs - bump via this override.
-if [ -n "${NEOHIVE_CHUNKER_TIMEOUT_MS:-}" ]; then
-  if ! printf '%s' "$NEOHIVE_CHUNKER_TIMEOUT_MS" | grep -qE '^[1-9][0-9]*$'; then
-    fail "NEOHIVE_CHUNKER_TIMEOUT_MS must be a positive integer (milliseconds). Got: '$NEOHIVE_CHUNKER_TIMEOUT_MS'"
+# Optional timeout overrides. All three are validated as positive integers
+# (milliseconds) and forwarded under the backend's internal MEMVEC_* names
+# so users only have to learn the NEOHIVE_-prefixed knobs. The PDF bridge
+# timeout is the one customers ingesting large PDFs need - a 900-page
+# document hits the 300s default well before docling finishes.
+forward_timeout_env() {
+  local user_var="$1"  # NEOHIVE_*
+  local container_var="$2"  # MEMVEC_*
+  local value="${!user_var:-}"
+  [ -z "$value" ] && return 0
+  if ! printf '%s' "$value" | grep -qE '^[1-9][0-9]*$'; then
+    fail "$user_var must be a positive integer (milliseconds). Got: '$value'"
   fi
-  info "chunker timeout override: ${NEOHIVE_CHUNKER_TIMEOUT_MS}ms"
-  RUN_ARGS+=(-e "MEMVEC_CHUNKER_TIMEOUT_MS=$NEOHIVE_CHUNKER_TIMEOUT_MS")
-fi
+  info "${container_var} override: ${value}ms"
+  RUN_ARGS+=(-e "${container_var}=${value}")
+}
+forward_timeout_env NEOHIVE_PDF_BRIDGE_TIMEOUT_MS MEMVEC_PDF_BRIDGE_TIMEOUT_MS
+forward_timeout_env NEOHIVE_PDF_WARMUP_TIMEOUT_MS MEMVEC_PDF_WARMUP_TIMEOUT_MS
+forward_timeout_env NEOHIVE_CHUNKER_TIMEOUT_MS    MEMVEC_CHUNKER_TIMEOUT_MS
 case "$BACKEND" in
   vulkan) RUN_ARGS+=(--device /dev/dri) ;;
   cuda)   RUN_ARGS+=(--gpus all) ;;
