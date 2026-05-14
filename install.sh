@@ -6,14 +6,17 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh)
 #
 # Environment overrides (all optional):
-#   NEOHIVE_BACKEND    - force backend: cpu|vulkan|cuda|rocm (default: autodetect)
-#   NEOHIVE_PORT       - port to publish (default: 3577)
-#   NEOHIVE_PAT        - GHCR token; required when stdin is not a TTY
-#   NEOHIVE_ROTATE_PAT - set to 1 to force re-prompt even if cached PAT exists
+#   NEOHIVE_BACKEND        - force backend: cpu|vulkan|cuda|rocm (default: autodetect)
+#   NEOHIVE_PORT           - port to publish (default: 3577)
+#   NEOHIVE_PAT            - GHCR token; required when stdin is not a TTY
+#   NEOHIVE_ROTATE_PAT     - set to 1 to force re-prompt even if cached PAT exists
+#   NEOHIVE_LICENSE_KEY    - Keygen license key; required when stdin is not a TTY
+#   NEOHIVE_ROTATE_LICENSE - set to 1 to force re-read of license (skip cache)
 #
 # The PAT is cached at $XDG_CACHE_HOME/neohive/ghcr-pat (or ~/.cache/neohive/
 # if XDG is unset) with mode 0600 so the customer does not re-paste on
-# upgrade. Re-running the script is the supported upgrade path.
+# upgrade. The license key is cached at $CACHE_DIR/license-key, same mode.
+# Re-running the script is the supported upgrade path.
 #
 # The server serves plain HTTP on a single port. Customers who need TLS
 # wrap their MCP endpoint with the mcp-remote npm package on the client
@@ -24,12 +27,21 @@ set -euo pipefail
 IMAGE="ghcr.io/neohiveai/neohive"
 CONTAINER_NAME="neohive"
 VOLUME_NAME="neohive-data"
-DEFAULT_PORT=3577
+DEFAULT_PORT=13577
 HEALTH_TIMEOUT_SECONDS=60
-TOTAL_STEPS=7
+TOTAL_STEPS=9
+
+# Keygen account + product UUIDs baked at Phase 0 dashboard setup.
+# Account scopes the API namespace; product is required by Keygen's
+# validate-key when the policy is configured with product scope
+# (default for our setup). Both are non-secret - they appear in URL
+# paths and validation payloads.
+KEYGEN_ACCOUNT_ID="90b10ef0-ed7d-40ce-a1d4-21d568fdb574"
+KEYGEN_PRODUCT_ID="386b2255-8b79-4358-9e12-aaf3b3c17aa2"
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/neohive"
 PAT_FILE="$CACHE_DIR/ghcr-pat"
+LICENSE_FILE="$CACHE_DIR/license-key"
 PORT="${NEOHIVE_PORT:-$DEFAULT_PORT}"
 
 # -- Colour palette ----------------------------------------------------
@@ -153,6 +165,7 @@ print_post_install() {
   printf '\n'
   printf '     Upgrade:        re-run this installer (cached token is reused).\n'
   printf '     Rotate token:   %sNEOHIVE_ROTATE_PAT=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
+  printf '     Rotate license: %sNEOHIVE_ROTATE_LICENSE=1 NEOHIVE_LICENSE_KEY=<new-key> bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
   printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
 }
 
@@ -260,6 +273,176 @@ resolve_with_suffix() {
   return 1
 }
 
+# -- License resolver -------------------------------------------------
+# Defined above the library-mode guard so install-dev.sh (which sources
+# this file with NEOHIVE_LIB_ONLY=1) can call it directly. Priority:
+# env > cache (unless NEOHIVE_ROTATE_LICENSE=1) > TTY prompt.
+#
+# stdout is the license key. All status lines go to stderr to avoid
+# corrupting the value passed to curl.
+resolve_license() {
+  if [ -n "${NEOHIVE_LICENSE_KEY:-}" ]; then
+    info "Using license key from NEOHIVE_LICENSE_KEY env var" >&2
+    printf '%s' "$NEOHIVE_LICENSE_KEY"
+    return
+  fi
+  if [ "${NEOHIVE_ROTATE_LICENSE:-0}" != "1" ] && [ -s "$LICENSE_FILE" ]; then
+    info "Using cached license key at $LICENSE_FILE" >&2
+    cat "$LICENSE_FILE"
+    return
+  fi
+  if [ ! -t 0 ]; then
+    fail "No license key. Set NEOHIVE_LICENSE_KEY or run interactively. Contact hello@neohive.ai for a key."
+  fi
+  printf '      %sPaste your NeoHive license key (input hidden):%s ' "$C_BOLD" "$C_RESET" >&2
+  read -rs LICENSE_INPUT
+  printf '\n' >&2
+  if [ -z "$LICENSE_INPUT" ]; then
+    fail "Empty license key."
+  fi
+  if ! mkdir -p "$CACHE_DIR" 2>/dev/null; then
+    warn "Cannot create $CACHE_DIR - license key will not be persisted"
+  else
+    chmod 700 "$CACHE_DIR"
+    if printf '%s' "$LICENSE_INPUT" > "$LICENSE_FILE" 2>/dev/null; then
+      chmod 600 "$LICENSE_FILE"
+      info "License key cached to $LICENSE_FILE" >&2
+    else
+      warn "Cannot write $LICENSE_FILE - license key will not be persisted"
+    fi
+  fi
+  printf '%s' "$LICENSE_INPUT"
+}
+
+# Resolve the fingerprint the gateway will use at boot. The gateway reads
+# `${MEMVEC_DATA_DIR}/machine-id` (a persisted UUID) before falling back to
+# `/etc/machine-id` and hostname. To avoid the preflight registering a
+# different fingerprint than the running container (which would burn one
+# failed Keygen validation + one wasted activation per first install),
+# seed the same file into the data volume here and read it back.
+resolve_container_fingerprint() {
+  local fp
+  # Ensure the named volume exists; harmless if already present.
+  docker volume create "$VOLUME_NAME" >/dev/null 2>&1 || true
+  # If the volume already has a machine-id (subsequent installs), reuse it.
+  # Otherwise generate one and seed it now so the container reads the same
+  # value on first boot. Use the smallest cached image we can find to avoid
+  # pulling alpine just for this; busybox is also fine.
+  local helper_image="alpine:3"
+  if ! docker image inspect "$helper_image" >/dev/null 2>&1; then
+    if docker image inspect busybox >/dev/null 2>&1; then
+      helper_image="busybox"
+    fi
+  fi
+  fp="$(docker run --rm -v "$VOLUME_NAME:/app/data" "$helper_image" sh -c '
+    if [ -s /app/data/machine-id ]; then
+      cat /app/data/machine-id
+    else
+      id="$(cat /proc/sys/kernel/random/uuid)"
+      printf "%s" "$id" > /app/data/machine-id
+      chmod 600 /app/data/machine-id 2>/dev/null || true
+      printf "%s" "$id"
+    fi
+  ' 2>/dev/null | tr -d "\n\r ")"
+  if [ -z "$fp" ]; then
+    # Fallback: hostname+/etc/machine-id, matches the old behaviour.
+    warn "Could not seed fingerprint into $VOLUME_NAME; falling back to host machine-id"
+    fp="$(hostname):$(cat /etc/machine-id 2>/dev/null || echo unknown)"
+  fi
+  printf "%s" "$fp"
+}
+
+# Preflight: validate the license against api.keygen.sh before the
+# 2GB pull. Tolerates network/5xx (offline grace will cover at boot).
+# Hard-fails on 4xx and on 200-with-rejection-code so a bad key
+# never gets cached or trusted by the runtime.
+preflight_validate_license() {
+  local fp resp body status detail
+
+  if [ "$KEYGEN_ACCOUNT_ID" = "REPLACE_WITH_KEYGEN_ACCOUNT_UUID" ] || [ -z "$KEYGEN_ACCOUNT_ID" ]; then
+    fail "KEYGEN_ACCOUNT_ID not configured in install.sh (still placeholder). Build/release bug - contact hello@neohive.ai."
+  fi
+
+  fp="$(resolve_container_fingerprint)"
+
+  # Single curl: capture body + status code together to avoid two Keygen
+  # validation events per install.
+  resp="$(curl -sS --max-time 10 -w '\n__HTTP_STATUS__%{http_code}' \
+        -X POST \
+        -H 'Content-Type: application/vnd.api+json' \
+        -H 'Accept: application/vnd.api+json' \
+        -d "{\"meta\":{\"key\":\"$LICENSE_KEY\",\"scope\":{\"fingerprint\":\"$fp\",\"product\":\"$KEYGEN_PRODUCT_ID\"}}}" \
+        "https://api.keygen.sh/v1/accounts/$KEYGEN_ACCOUNT_ID/licenses/actions/validate-key" \
+        2>/dev/null)"
+  if [ $? -ne 0 ] || [ -z "$resp" ]; then
+    warn "Could not reach api.keygen.sh (network/DNS) - proceeding (offline grace will apply at boot)"
+    return 0
+  fi
+
+  status="${resp##*__HTTP_STATUS__}"
+  body="${resp%__HTTP_STATUS__*}"
+  # Drop the trailing newline that separated body from sentinel.
+  body="${body%$'\n'}"
+
+  if [ -z "$status" ] || [ "$status" = "000" ]; then
+    warn "Could not reach api.keygen.sh (network/DNS) - proceeding (offline grace will apply at boot)"
+    return 0
+  fi
+
+  if [ "$status" -ge 500 ] 2>/dev/null; then
+    warn "api.keygen.sh returned HTTP $status - proceeding (offline grace will apply at boot)"
+    return 0
+  fi
+
+  if [ "$status" -ge 400 ] && [ "$status" -lt 500 ] 2>/dev/null; then
+    detail=$(echo "$body" | grep -oE '"detail":"[^"]*"' | head -n1 | cut -d'"' -f4)
+    rm -f "$LICENSE_FILE"
+    warn "License rejected by Keygen (HTTP $status): ${detail:-unknown}"
+    return 1
+  fi
+
+  if echo "$body" | grep -qE '"code":"(VALID|NO_MACHINE|NO_MACHINES|FINGERPRINT_SCOPE_MISMATCH)"'; then
+    detail=$(echo "$body" | grep -oE '"detail":"[^"]*"' | head -n1 | cut -d'"' -f4)
+    ok "${detail:-license accepted}"
+    return 0
+  fi
+
+  detail=$(echo "$body" | grep -oE '"detail":"[^"]*"' | head -n1 | cut -d'"' -f4)
+  rm -f "$LICENSE_FILE"
+  warn "License rejected by Keygen: ${detail:-unknown}"
+  return 1
+}
+
+# Wrap resolve_license + preflight in a retry loop. On rejection we
+# clear the cache (preflight already did) and re-prompt the user with
+# NEOHIVE_ROTATE_LICENSE=1 set so resolve_license skips any stale env
+# value path that points back at the bad key. Non-TTY runs cannot
+# re-prompt so we give up after the first failure - same behaviour
+# as a missing key.
+license_resolve_and_validate() {
+  local max_attempts=3 attempt=1
+  while [ $attempt -le $max_attempts ]; do
+    LICENSE_KEY="$(resolve_license)"
+    if preflight_validate_license; then
+      return 0
+    fi
+    if [ ! -t 0 ]; then
+      fail "License rejected and stdin is not a TTY - cannot re-prompt. Set NEOHIVE_LICENSE_KEY to a valid key and retry."
+    fi
+    if [ $attempt -ge $max_attempts ]; then
+      fail "License rejected after $max_attempts attempts. Contact hello@neohive.ai."
+    fi
+    warn "Attempt $attempt of $max_attempts failed - re-prompting for license key"
+    # Force a fresh prompt: cache was rm'd in preflight, but a stale
+    # NEOHIVE_LICENSE_KEY env var would short-circuit resolve_license
+    # straight back to the bad value. Unset it for retries.
+    unset NEOHIVE_LICENSE_KEY
+    export NEOHIVE_ROTATE_LICENSE=1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 # ----------------------------------------------------------------------
 # Main flow
 # ----------------------------------------------------------------------
@@ -273,7 +456,7 @@ fi
 
 print_banner
 
-# [1/7] Platform
+# [1/9] Platform
 # NeoHive images are published as multi-arch manifest lists - `:cpu`,
 # `:latest`, and `:v<version>` carry both linux/amd64 and linux/arm64
 # layers, and `docker pull` selects the matching layer automatically.
@@ -289,7 +472,7 @@ case "$UNAME_S" in
 esac
 ok
 
-# [2/7] Docker
+# [2/9] Docker
 step 2 "Checking Docker..."
 if ! command -v docker >/dev/null 2>&1; then
   fail "Docker is not installed. Install from https://docs.docker.com/get-docker/ and retry."
@@ -301,13 +484,35 @@ DOCKER_VERSION="$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',' ||
 info "Docker ${DOCKER_VERSION:-(unknown version)} - daemon reachable"
 ok
 
-# [3/7] Backend detect
+# [3/9] License resolution
+# Priority: env var > cache (unless rotate set) > interactive TTY prompt.
+# Non-TTY without env var fails fast - the container refuses to boot
+# without a key, so failing here saves the customer a 2GB pull.
+step 3 "Resolving license key..."
+LICENSE_KEY="$(resolve_license)"
+ok
+
+# [4/9] Pre-flight license validation
+# Catches bad/expired keys before the 2GB pull. Tolerates network
+# failure (firewall, no DNS) - the container has a 72h offline grace
+# at boot, so an unreachable api.keygen.sh should not block install.
+# Acceptable codes: VALID (already activated for this fingerprint),
+# NO_MACHINES (first install - gateway will activate at boot), and
+# FINGERPRINT_SCOPE_MISMATCH (same: gateway will activate).
+# On 4xx rejection: re-prompt up to 3 times (TTY only) so a typo or a
+# rotated key does not force the user to restart the installer.
+step 4 "Validating license with Keygen..."
+if ! preflight_validate_license; then
+  license_resolve_and_validate
+fi
+
+# [5/9] Backend detect
 # On arm64 we skip GPU autodetection entirely: the release pipeline only
 # builds cpu for arm64 (cuda/rocm need NVIDIA/AMD data-centre silicon,
 # vulkan is irrelevant on Mac). A forced NEOHIVE_BACKEND still wins - if
 # the user knows they have a Jetson or similar, let them try, and the
 # pull stage will fail loudly if no matching image exists.
-step 3 "Detecting hardware backend..."
+step 5 "Detecting hardware backend..."
 if [ -n "${NEOHIVE_BACKEND:-}" ]; then
   BACKEND="$NEOHIVE_BACKEND"
   FORCED=1
@@ -362,8 +567,8 @@ if [ "$FORCED" -eq 1 ]; then
 fi
 ok "using '$BACKEND' backend"
 
-# [4/7] PAT resolution
-step 4 "Resolving access token..."
+# [6/9] PAT resolution
+step 6 "Resolving access token..."
 resolve_pat() {
   # This function's STDOUT is the PAT. Status messages go to stderr
   # only - a stray newline on stdout corrupts the token and makes
@@ -403,15 +608,15 @@ resolve_pat() {
 PAT="$(resolve_pat)"
 ok
 
-# [5/7] Authenticate
-step 5 "Authenticating to GHCR..."
+# [7/9] Authenticate
+step 7 "Authenticating to GHCR..."
 if ! printf '%s' "$PAT" | docker login ghcr.io -u neohive-service --password-stdin >/dev/null 2>&1; then
   rm -f "$PAT_FILE"
   fail "docker login ghcr.io failed. Your token may be revoked or expired. Re-run to enter a new one."
 fi
 ok "ghcr.io/neohive-service"
 
-# [6/7] Pull
+# [8/9] Pull
 # Resolution order:
 #   1. Floating per-backend tag (:cpu, :cuda, :vulkan, :rocm) via the
 #      fallback chain in resolve_with_suffix - each is a multi-arch
@@ -424,7 +629,7 @@ ok "ghcr.io/neohive-service"
 # A forced backend (NEOHIVE_BACKEND set) skips fallback entirely and
 # fails on a single missed pull, so the override is never silently
 # downgraded.
-step 6 "Pulling container image..."
+step 8 "Pulling container image..."
 RESOLVED_TAG=""
 if [ "$FORCED" -eq 1 ]; then
   if try_pull_tag "$BACKEND"; then
@@ -440,8 +645,8 @@ if [ -z "$RESOLVED_TAG" ]; then
 fi
 ok "image ready ($RESOLVED_TAG)"
 
-# [7/7] Run
-step 7 "Starting NeoHive server..."
+# [9/9] Run
+step 9 "Starting NeoHive server..."
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   info "Stopping existing container for upgrade..."
   docker rm -f "$CONTAINER_NAME" >/dev/null
@@ -449,11 +654,28 @@ fi
 RUN_ARGS=(
   -d
   --name "$CONTAINER_NAME"
-  --restart unless-stopped
+  --restart on-failure:3
   -v "$VOLUME_NAME:/app/data"
   -p "$PORT:3577"
-  -e NEOHIVE_LICENSE_ENABLED=false
+  -e NEOHIVE_LICENSE_KEY="$LICENSE_KEY"
 )
+# Note: NEOHIVE_KEYGEN_ACCOUNT_ID, NEOHIVE_KEYGEN_PRODUCT_ID, KEYGEN
+# API URL, and grace-hours are NOT passed through. They are baked into
+# the image (cognitive-memory/src/gateway/license-config.ts) and the
+# production build ignores env overrides for them on purpose - this
+# is what stops a customer from redirecting validation to a fake
+# Keygen tenant or extending the offline grace window arbitrarily.
+# Bind-mount /etc/machine-id so the container fingerprint is stable
+# across recreations. The volume-seeded /app/data/machine-id (written by
+# resolve_container_fingerprint) is the primary source the gateway
+# reads, but bind-mounting the host's id keeps the fallback path stable
+# too. macOS Docker Desktop synthesizes its own machine-id inside the
+# VM and the host file may be missing - warn and proceed in that case.
+if [ -f /etc/machine-id ]; then
+  RUN_ARGS+=(-v /etc/machine-id:/etc/machine-id:ro)
+else
+  warn "/etc/machine-id not found on host; container will use its own. Restarts may consume Keygen seats."
+fi
 case "$BACKEND" in
   vulkan) RUN_ARGS+=(--device /dev/dri) ;;
   cuda)   RUN_ARGS+=(--gpus all) ;;
@@ -479,5 +701,29 @@ if [ $HEALTHY -eq 0 ]; then
 fi
 ELAPSED=$(( $(date +%s) - START ))
 ok "ready in ${ELAPSED}s"
+
+# Query the gateway's /api/license/status once it is up. Best-effort:
+# if the endpoint cannot be reached or fields are missing, just skip
+# the line - the install itself already succeeded.
+print_license_summary() {
+  local status mode expires holder days attempts=0
+  while [ $attempts -lt 15 ]; do
+    if status="$(curl -sSf -m 2 "http://localhost:$PORT/api/license/status" 2>/dev/null)"; then
+      mode=$(echo "$status" | grep -oE '"status":"[^"]+"' | head -n1 | cut -d'"' -f4)
+      expires=$(echo "$status" | grep -oE '"expiresAt":"[^"]+"' | head -n1 | cut -d'"' -f4)
+      holder=$(echo "$status" | grep -oE '"holderName":"[^"]+"' | head -n1 | cut -d'"' -f4)
+      days=$(echo "$status" | grep -oE '"daysRemaining":-?[0-9]+' | head -n1 | cut -d':' -f2)
+      printf '      License: %s' "${mode:-unknown}"
+      [ -n "$expires" ] && printf ' (expires %s, %s days)' "$expires" "$days"
+      [ -n "$holder" ] && printf ' - %s' "$holder"
+      printf '\n'
+      return
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  warn "Could not query license status from gateway"
+}
+print_license_summary
 
 print_post_install
