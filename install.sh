@@ -6,12 +6,27 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh)
 #
 # Environment overrides (all optional):
-#   NEOHIVE_BACKEND        - force backend: cpu|vulkan|cuda|rocm (default: autodetect)
-#   NEOHIVE_PORT           - port to publish (default: 3577)
-#   NEOHIVE_PAT            - GHCR token; required when stdin is not a TTY
-#   NEOHIVE_ROTATE_PAT     - set to 1 to force re-prompt even if cached PAT exists
-#   NEOHIVE_LICENSE_KEY    - Keygen license key; required when stdin is not a TTY
-#   NEOHIVE_ROTATE_LICENSE - set to 1 to force re-read of license (skip cache)
+#   NEOHIVE_BACKEND            - force backend: cpu|vulkan|cuda|rocm (default: autodetect)
+#   NEOHIVE_PORT               - port to publish (default: 3577)
+#   NEOHIVE_PAT                - GHCR token; required when stdin is not a TTY
+#   NEOHIVE_ROTATE_PAT         - set to 1 to force re-prompt even if cached PAT exists
+#   NEOHIVE_LICENSE_KEY        - Keygen license key; required when stdin is not a TTY
+#   NEOHIVE_ROTATE_LICENSE     - set to 1 to force re-read of license (skip cache)
+#   NEOHIVE_UPDATE_REPO        - override the GHCR repo for in-app update checks
+#   NEOHIVE_PDF_BRIDGE_TIMEOUT_MS  - docling PDF bridge per-document timeout in ms
+#                                    (default 300000 = 5 min). Raise this for very
+#                                    large PDFs - a 900-page document can need
+#                                    25-30 minutes. Example: 1800000 (30 min).
+#                                    Forwarded as MEMVEC_PDF_BRIDGE_TIMEOUT_MS.
+#   NEOHIVE_PDF_WARMUP_TIMEOUT_MS  - docling model-warmup timeout in ms (default
+#                                    300000 = 5 min). Raise this on first-boot
+#                                    hosts that pay a slow HuggingFace download.
+#                                    Forwarded as MEMVEC_PDF_WARMUP_TIMEOUT_MS.
+#   NEOHIVE_CHUNKER_TIMEOUT_MS     - markdown/code chunker subprocess timeout in
+#                                    ms (default 30000). Distinct from the PDF
+#                                    bridge timeout above - this gates the
+#                                    chonkie/Rust splitter, not docling.
+#                                    Forwarded as MEMVEC_CHUNKER_TIMEOUT_MS.
 #
 # The PAT is cached at $XDG_CACHE_HOME/neohive/ghcr-pat (or ~/.cache/neohive/
 # if XDG is unset) with mode 0600 so the customer does not re-paste on
@@ -30,6 +45,7 @@ VOLUME_NAME="neohive-data"
 DEFAULT_PORT=13577
 HEALTH_TIMEOUT_SECONDS=60
 TOTAL_STEPS=9
+MAX_LOGIN_ATTEMPTS=3
 
 # Keygen account + product UUIDs baked at Phase 0 dashboard setup.
 # Account scopes the API namespace; product is required by Keygen's
@@ -39,10 +55,31 @@ TOTAL_STEPS=9
 KEYGEN_ACCOUNT_ID="90b10ef0-ed7d-40ce-a1d4-21d568fdb574"
 KEYGEN_PRODUCT_ID="386b2255-8b79-4358-9e12-aaf3b3c17aa2"
 
+# Pre-release tag pattern. Applied at every point the installer can
+# resolve a versioned tag - at registry enumeration time
+# (list_versioned_tags) and at pull time (try_pull_tag). Defining it
+# once and reusing it makes pre-release rejection an invariant of the
+# resolver: a future code path that hand-rolls version tags cannot
+# bypass the filter by skipping list_versioned_tags. This is what
+# lets the upstream release pipeline publish arm64 RC builds
+# (v<X>-cpu-arm64) without leaking them to Apple Silicon customers.
+PRERELEASE_TAG_PATTERN='-(rc|beta|alpha|pre|dev)'
+
+# CHANGELOG.md in this repo, surfaced post-install on upgrades.
+CHANGELOG_RAW_URL="https://raw.githubusercontent.com/NeoHiveAI/install/main/CHANGELOG.md"
+CHANGELOG_VIEW_URL="https://github.com/NeoHiveAI/install/blob/main/CHANGELOG.md"
+
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/neohive"
 PAT_FILE="$CACHE_DIR/ghcr-pat"
 LICENSE_FILE="$CACHE_DIR/license-key"
 PORT="${NEOHIVE_PORT:-$DEFAULT_PORT}"
+
+# Detected once near boot, before docker rm/run rewrite the world.
+# Presence of the data volume is a more durable signal than the container
+# being alive: a previous `docker rm` would have removed the container
+# but the volume persists across reinstalls.
+RELEASE_VERSION=""
+RELEASE_OVERVIEW=""
 
 # -- Colour palette ----------------------------------------------------
 # 256-colour ANSI. Terminals without 256-colour support fall through
@@ -169,6 +206,92 @@ print_post_install() {
   printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
 }
 
+# -- Release notes (used on upgrade) ----------------------------------
+# Best-effort fetch of CHANGELOG.md from this repo and extraction of the
+# first version section's "### Release overview" body. On any failure
+# (no network, 404, malformed file) we silently fall back to the generic
+# post-install summary so a flaky fetch never breaks an upgrade.
+fetch_latest_release_notes() {
+  local md
+  md="$(curl -fsSL --max-time 10 "$CHANGELOG_RAW_URL" 2>/dev/null)" || return 1
+  [ -n "$md" ] || return 1
+  # awk parses the FIRST `## v?X.Y.Z` section and extracts the body of
+  # the `### Release overview` block within it. Stops at the next ## or
+  # ### heading so we capture exactly one overview.
+  local parsed
+  parsed="$(
+    printf '%s\n' "$md" | awk '
+      BEGIN { ver = ""; in_ovr = 0 }
+      /^## v?[0-9]+\.[0-9]+\.[0-9]+/ {
+        if (ver != "") exit
+        if (match($0, /v?[0-9]+\.[0-9]+\.[0-9]+/)) {
+          ver = substr($0, RSTART, RLENGTH)
+        }
+        print "VERSION:" ver
+        next
+      }
+      /^### Release overview/ { in_ovr = 1; next }
+      /^(## |### )/ { if (in_ovr) in_ovr = 0 }
+      in_ovr { print "BODY:" $0 }
+    '
+  )"
+  [ -n "$parsed" ] || return 1
+  RELEASE_VERSION="$(printf '%s\n' "$parsed" | sed -n 's/^VERSION://p' | head -n1)"
+  RELEASE_OVERVIEW="$(printf '%s\n' "$parsed" | sed -n 's/^BODY://p')"
+  # Trim leading and trailing blank lines from the overview body.
+  RELEASE_OVERVIEW="$(printf '%s' "$RELEASE_OVERVIEW" | awk 'NF { found=1 } found' | sed -e :a -e '/^$/{$d;N;ba' -e '}')"
+  [ -n "$RELEASE_VERSION" ] && [ -n "$RELEASE_OVERVIEW" ]
+}
+
+# Post-install summary variant for upgrades. Replaces the "Next step:
+# create your first project" block (wrong for an upgrade) with release
+# notes for the version that was just pulled, plus a link to the full
+# changelog. Falls back to the generic summary if release notes are
+# unavailable.
+print_post_install_update() {
+  if ! fetch_latest_release_notes; then
+    # CHANGELOG fetch failed - still announce the upgrade but skip notes.
+    local line lan_ip
+    line=$(printf '%*s' 67 '' | tr ' ' '-')
+    lan_ip="$(detect_lan_ip)"
+    printf '\n   %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
+    printf '   %s%sNeoHive updated.%s\n\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
+    printf '     %sRelease notes unavailable (fetch failed). See:%s\n' "$C_DIM" "$C_RESET"
+    printf '     %s%s%s\n\n' "$C_CYAN" "$CHANGELOG_VIEW_URL" "$C_RESET"
+    printf '     Dashboard:  %shttp://localhost:%s%s\n' "$C_CYAN" "$PORT" "$C_RESET"
+    [ -n "$lan_ip" ] && printf '     LAN:        %shttp://%s:%s%s\n' "$C_CYAN" "$lan_ip" "$PORT" "$C_RESET"
+    printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
+    return
+  fi
+
+  local line lan_ip
+  line=$(printf '%*s' 67 '' | tr ' ' '-')
+  lan_ip="$(detect_lan_ip)"
+
+  printf '\n   %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
+  printf '   %s%sNeoHive updated to %s.%s\n\n' "$C_BOLD" "$C_GREEN" "$RELEASE_VERSION" "$C_RESET"
+
+  printf '   %s%sWhat'\''s new%s\n\n' "$C_BOLD" "$C_VIOLET" "$C_RESET"
+  # Indent each overview line by 5 spaces so it sits inside the framed block.
+  printf '%s\n' "$RELEASE_OVERVIEW" | sed 's/^/     /'
+  printf '\n'
+  printf '     Full changelog: %s%s%s\n\n' "$C_CYAN" "$CHANGELOG_VIEW_URL" "$C_RESET"
+
+  printf '   Dashboard:  %shttp://localhost:%s%s\n' "$C_CYAN" "$PORT" "$C_RESET"
+  if [ -n "$lan_ip" ]; then
+    printf '   LAN:        %shttp://%s:%s%s\n' "$C_CYAN" "$lan_ip" "$PORT" "$C_RESET"
+  fi
+  printf '\n'
+
+  printf '   %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
+  printf '   %sReference%s\n\n' "$C_BOLD" "$C_RESET"
+  printf '     Container ops:\n'
+  printf '       %sdocker logs -f %s%s\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
+  printf '       %sdocker restart %s%s\n\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
+  printf '     Rotate token:   %sNEOHIVE_ROTATE_PAT=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
+  printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
+}
+
 # -- Backend fallback chain -------------------------------------------
 # Each detected backend tries to pull its matching image; on a missing
 # tag we degrade along this chain and re-try. The CPU image is the
@@ -192,6 +315,14 @@ backend_chain() {
 # condition, which is how we guard the pull without disabling -e.
 try_pull_tag() {
   local tag="$1"
+  # Defense in depth: refuse pre-release tags however the caller
+  # obtained them. list_versioned_tags filters at enumeration; this
+  # guard ensures a code path added later that hands a versioned tag
+  # straight to the puller cannot bypass that filter.
+  if printf '%s' "$tag" | grep -qE -- "$PRERELEASE_TAG_PATTERN"; then
+    info "refusing pre-release tag $tag"
+    return 1
+  fi
   info "pulling $IMAGE:$tag"
   if docker pull "$IMAGE:$tag"; then
     return 0
@@ -217,14 +348,15 @@ list_versioned_tags() {
     -H "Authorization: Bearer $bearer" \
     "https://ghcr.io/v2/neohiveai/neohive/tags/list" 2>/dev/null)"
   [ -z "$tags_json" ] && return 0
-  # Filter out pre-release tags (-rc, -beta, -alpha, -pre, -dev) so a
-  # versioned pre-release that leaked into GHCR cannot be promoted to
-  # a fresh customer via sort -rV. sort -V does not implement semver
-  # pre-release ordering - it would rank v1.4.5-rc1 above v1.4.4.
+  # Filter out pre-release tags so a versioned pre-release that leaked
+  # into GHCR cannot be promoted to a fresh customer via sort -rV.
+  # sort -V does not implement semver pre-release ordering - it would
+  # rank v1.4.5-rc1 above v1.4.4. See PRERELEASE_TAG_PATTERN at the
+  # top of this file for the canonical pattern.
   printf '%s' "$tags_json" \
     | tr ',' '\n' \
     | sed -n 's/.*"\(v[0-9][^"]*-'"$suffix"'\)".*/\1/p' \
-    | grep -vE -- '-(rc|beta|alpha|pre|dev)' \
+    | grep -vE -- "$PRERELEASE_TAG_PATTERN" \
     | sort -rV
 }
 
@@ -609,11 +741,32 @@ PAT="$(resolve_pat)"
 ok
 
 # [7/9] Authenticate
+# On rejection we clear the cached token and re-prompt up to
+# MAX_LOGIN_ATTEMPTS times. If NEOHIVE_PAT was set explicitly we cannot
+# re-prompt over an env-driven value, so we fail fast with the specific
+# reason. Non-TTY runs likewise cannot recover - they must pass a valid
+# NEOHIVE_PAT and retry.
 step 7 "Authenticating to GHCR..."
-if ! printf '%s' "$PAT" | docker login ghcr.io -u neohive-service --password-stdin >/dev/null 2>&1; then
+LOGIN_ATTEMPT=0
+while :; do
+  LOGIN_ATTEMPT=$((LOGIN_ATTEMPT + 1))
+  if printf '%s' "$PAT" | docker login ghcr.io -u neohive-service --password-stdin >/dev/null 2>&1; then
+    break
+  fi
   rm -f "$PAT_FILE"
-  fail "docker login ghcr.io failed. Your token may be revoked or expired. Re-run to enter a new one."
-fi
+  if [ -n "${NEOHIVE_PAT:-}" ]; then
+    fail "docker login ghcr.io rejected the token from NEOHIVE_PAT. Check it has 'read:packages' scope on $IMAGE."
+  fi
+  if [ "$LOGIN_ATTEMPT" -ge "$MAX_LOGIN_ATTEMPTS" ]; then
+    fail "docker login ghcr.io failed after $MAX_LOGIN_ATTEMPTS attempts. The token may be revoked or lack 'read:packages' scope on $IMAGE."
+  fi
+  if [ ! -t 0 ]; then
+    fail "docker login ghcr.io failed and stdin is not a TTY (cannot re-prompt). Pass a valid NEOHIVE_PAT and retry."
+  fi
+  warn "GHCR rejected that token. Let's try a different one (attempt $((LOGIN_ATTEMPT + 1)) of $MAX_LOGIN_ATTEMPTS)."
+  NEOHIVE_ROTATE_PAT=1
+  PAT="$(resolve_pat)"
+done
 ok "ghcr.io/neohive-service"
 
 # [8/9] Pull
@@ -646,6 +799,15 @@ fi
 ok "image ready ($RESOLVED_TAG)"
 
 # [9/9] Run
+# Detect upgrade vs fresh install BEFORE we tear down the existing
+# container. Presence of the data volume is the durable signal - the
+# container may have been `docker rm`'d but a returning user's data
+# survives in the volume, and we still want to greet them with release
+# notes rather than the "create your first project" walkthrough.
+IS_UPDATE=0
+if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
+  IS_UPDATE=1
+fi
 step 9 "Starting NeoHive server..."
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   info "Stopping existing container for upgrade..."
@@ -658,6 +820,12 @@ RUN_ARGS=(
   -v "$VOLUME_NAME:/app/data"
   -p "$PORT:3577"
   -e NEOHIVE_LICENSE_KEY="$LICENSE_KEY"
+  # Forward the GHCR PAT so the server's in-app update check can query
+  # the same registry we just pulled from. Without this the banner stays
+  # blank with "NEOHIVE_PAT not set". The host-side `docker login` only
+  # authenticates the pull; the daemon does not pass that into the
+  # container.
+  -e "NEOHIVE_PAT=$PAT"
 )
 # Note: NEOHIVE_KEYGEN_ACCOUNT_ID, NEOHIVE_KEYGEN_PRODUCT_ID, KEYGEN
 # API URL, and grace-hours are NOT passed through. They are baked into
@@ -676,6 +844,28 @@ if [ -f /etc/machine-id ]; then
 else
   warn "/etc/machine-id not found on host; container will use its own. Restarts may consume Keygen seats."
 fi
+if [ -n "${NEOHIVE_UPDATE_REPO:-}" ]; then
+  RUN_ARGS+=(-e "NEOHIVE_UPDATE_REPO=$NEOHIVE_UPDATE_REPO")
+fi
+# Optional timeout overrides. All three are validated as positive integers
+# (milliseconds) and forwarded under the backend's internal MEMVEC_* names
+# so users only have to learn the NEOHIVE_-prefixed knobs. The PDF bridge
+# timeout is the one customers ingesting large PDFs need - a 900-page
+# document hits the 300s default well before docling finishes.
+forward_timeout_env() {
+  local user_var="$1"  # NEOHIVE_*
+  local container_var="$2"  # MEMVEC_*
+  local value="${!user_var:-}"
+  [ -z "$value" ] && return 0
+  if ! printf '%s' "$value" | grep -qE '^[1-9][0-9]*$'; then
+    fail "$user_var must be a positive integer (milliseconds). Got: '$value'"
+  fi
+  info "${container_var} override: ${value}ms"
+  RUN_ARGS+=(-e "${container_var}=${value}")
+}
+forward_timeout_env NEOHIVE_PDF_BRIDGE_TIMEOUT_MS MEMVEC_PDF_BRIDGE_TIMEOUT_MS
+forward_timeout_env NEOHIVE_PDF_WARMUP_TIMEOUT_MS MEMVEC_PDF_WARMUP_TIMEOUT_MS
+forward_timeout_env NEOHIVE_CHUNKER_TIMEOUT_MS    MEMVEC_CHUNKER_TIMEOUT_MS
 case "$BACKEND" in
   vulkan) RUN_ARGS+=(--device /dev/dri) ;;
   cuda)   RUN_ARGS+=(--gpus all) ;;
@@ -726,4 +916,8 @@ print_license_summary() {
 }
 print_license_summary
 
-print_post_install
+if [ "$IS_UPDATE" -eq 1 ]; then
+  print_post_install_update
+else
+  print_post_install
+fi

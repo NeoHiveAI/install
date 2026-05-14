@@ -44,6 +44,35 @@ is cached at `~/.cache/neohive/ghcr-pat` so upgrades don't re-prompt.
 Re-run the install command. The `neohive-data` Docker volume is preserved
 across upgrades.
 
+## Force the CPU backend
+
+The installer auto-detects your hardware (CUDA, ROCm, Vulkan, or CPU).
+If detection picks the wrong backend, or the chosen backend fails to
+pull or start, retry with the CPU backend forced on:
+
+```sh
+NEOHIVE_BACKEND=cpu bash <(curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh)
+```
+
+CPU mode runs everywhere but is slower than a working GPU backend.
+**Please also report the failure** to the NeoHive team (`support@neohive.ai`
+or your pilot onboarding contact) so we can fix the underlying backend issue.
+The installer surfaces this command on stderr when a pull or start
+failure looks backend-related.
+
+## Replace the access token
+
+If you got a new access token, or accidentally pasted the wrong one when
+the installer first prompted, force a re-prompt:
+
+```sh
+NEOHIVE_ROTATE_PAT=1 bash <(curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh)
+```
+
+If `docker login` rejects a cached token, the installer also clears
+`~/.cache/neohive/ghcr-pat` automatically — so a plain re-run is enough
+to re-prompt in that case.
+
 ## Uninstall
 
 ```sh
