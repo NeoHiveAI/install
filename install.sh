@@ -499,14 +499,13 @@ preflight_validate_license() {
 
   # Single curl: capture body + status code together to avoid two Keygen
   # validation events per install.
-  resp="$(curl -sS --max-time 10 -w '\n__HTTP_STATUS__%{http_code}' \
+  if ! resp="$(curl -sS --max-time 10 -w '\n__HTTP_STATUS__%{http_code}' \
         -X POST \
         -H 'Content-Type: application/vnd.api+json' \
         -H 'Accept: application/vnd.api+json' \
         -d "{\"meta\":{\"key\":\"$LICENSE_KEY\",\"scope\":{\"fingerprint\":\"$fp\",\"product\":\"$KEYGEN_PRODUCT_ID\"}}}" \
         "https://api.keygen.sh/v1/accounts/$KEYGEN_ACCOUNT_ID/licenses/actions/validate-key" \
-        2>/dev/null)"
-  if [ $? -ne 0 ] || [ -z "$resp" ]; then
+        2>/dev/null)" || [ -z "$resp" ]; then
     warn "Could not reach api.keygen.sh (network/DNS) - proceeding (offline grace will apply at boot)"
     return 0
   fi
