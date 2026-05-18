@@ -459,55 +459,87 @@ resolve_license() {
 
 # Resolve the fingerprint the gateway will use at boot. The gateway reads
 # `${MEMVEC_DATA_DIR}/machine-id` (a persisted UUID) before falling back to
-# `/etc/machine-id` and hostname. To avoid the preflight registering a
-# different fingerprint than the running container (which would burn one
-# failed Keygen validation + one wasted activation per first install),
-# seed the same file into the data volume here and read it back.
-# Sets globals FP_RESOLVED and FP_FROM_VOLUME (1 if seeded via docker volume,
-# 0 if fell back to hostname+/etc/machine-id). The volume-seeded path is the
-# only one stable across container recreations; the fallback is not, so the
-# caller must treat FP_FROM_VOLUME=0 as a seat-churn risk on hosts without
-# /etc/machine-id (macOS, Windows).
+# `/etc/machine-id` and hostname. To keep the preflight and the running
+# container in lockstep we own the UUID host-side and bind-mount it at
+# `/app/data/machine-id`. That makes seat allocation idempotent across
+# reinstalls regardless of whether the data volume already has a file, and
+# avoids the silent-failure mode where an alpine helper exec fails (Docker
+# Hub rate-limit, sandbox, daemon quirks) and the preflight ends up sending
+# `hostname:/etc/machine-id` while the container sends just the contents of
+# `/etc/machine-id` (mismatched fingerprints, NO_MACHINES on every preflight).
+#
+# Resolution order:
+#   1. Host cache `$CACHE_DIR/machine-id` (most stable across reinstalls).
+#   2. Existing volume `/app/data/machine-id` (older installs may have one
+#      written by the runtime gateway; reuse so we don't churn the seat).
+#   3. Fresh UUID generated host-side.
+#
+# In all paths the resolved UUID is mirrored to `$CACHE_DIR/machine-id` so
+# subsequent installs short-circuit at step 1. The bind-mount at step 9 then
+# overlays this file at /app/data/machine-id so the gateway reads the same
+# UUID the preflight just used.
 FP_RESOLVED=""
-FP_FROM_VOLUME=0
+FP_CACHE_FILE="$CACHE_DIR/machine-id"
 resolve_container_fingerprint() {
   if [ -n "$FP_RESOLVED" ]; then
     printf "%s" "$FP_RESOLVED"
     return 0
   fi
-  local fp
-  # Ensure the named volume exists; harmless if already present.
-  docker volume create "$VOLUME_NAME" >/dev/null 2>&1 || true
-  # If the volume already has a machine-id (subsequent installs), reuse it.
-  # Otherwise generate one and seed it now so the container reads the same
-  # value on first boot. Use the smallest cached image we can find to avoid
-  # pulling alpine just for this; busybox is also fine.
-  local helper_image="alpine:3"
-  if ! docker image inspect "$helper_image" >/dev/null 2>&1; then
-    if docker image inspect busybox >/dev/null 2>&1; then
-      helper_image="busybox"
+
+  local fp=""
+
+  # 1. Host cache wins.
+  if [ -s "$FP_CACHE_FILE" ]; then
+    fp="$(tr -d '\n\r ' < "$FP_CACHE_FILE" 2>/dev/null || true)"
+  fi
+
+  # 2. Read from existing volume (legacy installs).
+  if [ -z "$fp" ]; then
+    docker volume create "$VOLUME_NAME" >/dev/null 2>&1 || true
+    local helper_image="alpine:3"
+    if ! docker image inspect "$helper_image" >/dev/null 2>&1; then
+      if docker image inspect busybox >/dev/null 2>&1; then
+        helper_image="busybox"
+      fi
+    fi
+    fp="$(docker run --rm -v "$VOLUME_NAME:/app/data" "$helper_image" sh -c '
+      if [ -s /app/data/machine-id ]; then
+        cat /app/data/machine-id
+      fi
+    ' 2>/dev/null | tr -d '\n\r ' || true)"
+  fi
+
+  # 3. Generate a fresh UUID host-side.
+  if [ -z "$fp" ]; then
+    if [ -r /proc/sys/kernel/random/uuid ]; then
+      fp="$(tr -d '\n\r ' < /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+    fi
+    if [ -z "$fp" ] && command -v uuidgen >/dev/null 2>&1; then
+      fp="$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\n\r ' || true)"
+    fi
+    if [ -z "$fp" ] && command -v python3 >/dev/null 2>&1; then
+      fp="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null | tr -d '\n\r ' || true)"
     fi
   fi
-  fp="$(docker run --rm -v "$VOLUME_NAME:/app/data" "$helper_image" sh -c '
-    if [ -s /app/data/machine-id ]; then
-      cat /app/data/machine-id
-    else
-      id="$(cat /proc/sys/kernel/random/uuid)"
-      printf "%s" "$id" > /app/data/machine-id
-      chmod 600 /app/data/machine-id 2>/dev/null || true
-      printf "%s" "$id"
+
+  if [ -z "$fp" ]; then
+    fail E601 "Could not derive a machine fingerprint (no /proc/sys/kernel/random/uuid, uuidgen, or python3). Contact hello@neohive.ai."
+  fi
+
+  # Mirror to host cache so the next install short-circuits at step 1.
+  if mkdir -p "$CACHE_DIR" 2>/dev/null; then
+    chmod 700 "$CACHE_DIR" 2>/dev/null || true
+    if [ ! -s "$FP_CACHE_FILE" ]; then
+      if printf '%s' "$fp" > "$FP_CACHE_FILE" 2>/dev/null; then
+        chmod 600 "$FP_CACHE_FILE" 2>/dev/null || true
+      else
+        warn "Could not persist fingerprint to $FP_CACHE_FILE - reinstalls may consume new Keygen seats"
+      fi
     fi
-  ' 2>/dev/null | tr -d "\n\r ")"
-  if [ -n "$fp" ]; then
-    FP_FROM_VOLUME=1
   else
-    # Fallback: hostname+/etc/machine-id, matches the old behaviour.
-    # NOT stable across container recreations on hosts without
-    # /etc/machine-id; caller must hard-fail in that case.
-    warn "Could not seed fingerprint into $VOLUME_NAME; falling back to host machine-id"
-    fp="$(hostname):$(cat /etc/machine-id 2>/dev/null || echo unknown)"
-    FP_FROM_VOLUME=0
+    warn "Could not create $CACHE_DIR - reinstalls may consume new Keygen seats"
   fi
+
   FP_RESOLVED="$fp"
   printf "%s" "$fp"
 }
@@ -560,9 +592,18 @@ preflight_validate_license() {
     return 1
   fi
 
-  if echo "$body" | grep -qE '"code":"(VALID|NO_MACHINE|NO_MACHINES|FINGERPRINT_SCOPE_MISMATCH)"'; then
+  if echo "$body" | grep -qE '"code":"VALID"'; then
     detail=$(echo "$body" | grep -oE '"detail":"[^"]*"' | head -n1 | cut -d'"' -f4)
     ok "${detail:-license accepted}"
+    return 0
+  fi
+  # NO_MACHINES / FINGERPRINT_SCOPE_MISMATCH: the license is valid but this
+  # fingerprint is not yet activated. The container's runtime activation will
+  # register the seat on first boot. Keygen's "detail" wording for these
+  # codes ("is not activated", "has no associated machines") reads as a
+  # warning to operators, so substitute a clearer message.
+  if echo "$body" | grep -qE '"code":"(NO_MACHINE|NO_MACHINES|FINGERPRINT_SCOPE_MISMATCH)"'; then
+    ok "license valid (this machine will be registered on first start)"
     return 0
   fi
 
@@ -858,17 +899,15 @@ RUN_ARGS=(
   # image so they cannot be overridden at runtime.
 )
 
-# Fingerprint must be stable across container recreations or every
-# restart burns a Keygen seat. Volume-seeded /app/data/machine-id is
-# the primary source; host /etc/machine-id is a fallback. If neither
-# is available, hard-fail instead of silently churning seats.
+# Fingerprint must be stable across container recreations or every restart
+# burns a Keygen seat. We bind-mount the host-cached UUID into the data dir
+# so the gateway reads it via `${MEMVEC_DATA_DIR}/machine-id` regardless of
+# what the volume contains, and the preflight UUID matches the runtime UUID.
 resolve_container_fingerprint >/dev/null
-if [ -f /etc/machine-id ]; then
-  RUN_ARGS+=(-v /etc/machine-id:/etc/machine-id:ro)
-elif [ "$FP_FROM_VOLUME" = "1" ]; then
-  info "/etc/machine-id absent on host (normal on macOS/Windows Docker Desktop); using volume-seeded fingerprint."
+if [ -s "$FP_CACHE_FILE" ]; then
+  RUN_ARGS+=(-v "$FP_CACHE_FILE:/app/data/machine-id:ro")
 else
-  fail E601 "/etc/machine-id absent on host AND volume fingerprint seed failed. Restarting this container would consume a new Keygen seat each time. Check Docker permissions on volume '$VOLUME_NAME', then re-run. Contact hello@neohive.ai if the problem persists."
+  fail E601 "Fingerprint cache $FP_CACHE_FILE is missing. Restarting this container would consume a new Keygen seat each time. Contact hello@neohive.ai."
 fi
 if [ -n "${NEOHIVE_UPDATE_REPO:-}" ]; then
   RUN_ARGS+=(-e "NEOHIVE_UPDATE_REPO=$NEOHIVE_UPDATE_REPO")
