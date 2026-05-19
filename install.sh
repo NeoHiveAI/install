@@ -68,6 +68,7 @@ PRERELEASE_TAG_PATTERN='-(rc|beta|alpha|pre|dev)'
 CHANGELOG_RAW_URL="https://raw.githubusercontent.com/NeoHiveAI/install/main/CHANGELOG.md"
 CHANGELOG_VIEW_URL="https://github.com/NeoHiveAI/install/blob/main/CHANGELOG.md"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/neohive"
 PAT_FILE="$CACHE_DIR/ghcr-pat"
 LICENSE_FILE="$CACHE_DIR/license-key"
@@ -416,6 +417,81 @@ resolve_with_suffix() {
   return 1
 }
 
+# -- License file reader ----------------------------------------------
+# Extract a license key from a file. JSON files (".json" suffix) are
+# parsed for a `.key` or `.license_key` field; everything else is
+# treated as plain text - first non-empty trimmed line is the key.
+#
+# Result is written directly into NEOHIVE_LICENSE_KEY rather than stdout.
+# This avoids running `fail` inside a `$(...)` command substitution, where
+# `exit 1` only kills the subshell - the parent assignment would get an
+# empty value and the installer would continue with a blank key.
+# `inherit_errexit` is not on (and cannot be flipped safely - other call
+# sites like list_versioned_tags rely on empty-on-failure $() behaviour),
+# so writing to a shared variable in the parent shell is the safe fix.
+read_license_file() {
+  local path="$1" raw key=""
+  NEOHIVE_LICENSE_KEY=""
+  [ -r "$path" ] || fail E304 "License file '$path' is not readable."
+  raw="$(cat "$path")"
+  [ -n "$raw" ] || fail E305 "License file '$path' is empty."
+  case "$path" in
+    *.json)
+      if command -v jq >/dev/null 2>&1; then
+        key="$(printf '%s' "$raw" | jq -r '.key // .license_key // empty' 2>/dev/null || true)"
+      fi
+      if [ -z "$key" ]; then
+        key="$(printf '%s' "$raw" | grep -oE '"(license_)?key"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"$/\1/')"
+      fi
+      [ -n "$key" ] || fail E306 "License file '$path' is JSON but no .key field found."
+      ;;
+    *)
+      key="$(printf '%s' "$raw" | tr -d '\r' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | head -n1)"
+      ;;
+  esac
+  [ -n "$key" ] || fail E307 "Could not extract license key from '$path'."
+  NEOHIVE_LICENSE_KEY="$key"
+  export NEOHIVE_LICENSE_KEY
+}
+
+# Resolve a license file path then export NEOHIVE_LICENSE_KEY from it
+# so resolve_license picks it up via the env-var branch. Skipped if
+# NEOHIVE_LICENSE_KEY is already set (env always wins) or if the user
+# asked for rotation (NEOHIVE_ROTATE_LICENSE=1).
+#
+# Arg $1: explicit path from CLI flag (may be empty).
+#
+# Resolution order: $1 > NEOHIVE_LICENSE_FILE > auto-detect license.json
+# / license.key in CWD then the installer's script dir.
+apply_license_file() {
+  local cli_path="${1:-}" resolved="" candidate
+  [ -n "${NEOHIVE_LICENSE_KEY:-}" ] && return 0
+  [ "${NEOHIVE_ROTATE_LICENSE:-0}" = "1" ] && return 0
+  if [ -n "$cli_path" ]; then
+    [ -f "$cli_path" ] || fail E308 "--license-file '$cli_path' does not exist."
+    resolved="$cli_path"
+  elif [ -n "${NEOHIVE_LICENSE_FILE:-}" ]; then
+    [ -f "$NEOHIVE_LICENSE_FILE" ] || fail E309 "NEOHIVE_LICENSE_FILE '$NEOHIVE_LICENSE_FILE' does not exist."
+    resolved="$NEOHIVE_LICENSE_FILE"
+  else
+    for candidate in \
+      "$PWD/license.json" "$PWD/license.key" \
+      "$SCRIPT_DIR/license.json" "$SCRIPT_DIR/license.key"; do
+      if [ -f "$candidate" ]; then
+        resolved="$candidate"
+        break
+      fi
+    done
+  fi
+  if [ -n "$resolved" ]; then
+    # Call without command substitution so `fail` inside read_license_file
+    # exits the installer instead of the subshell. The function writes
+    # NEOHIVE_LICENSE_KEY directly. See note on read_license_file.
+    read_license_file "$resolved"
+    info "Loaded license key from $resolved" >&2
+  fi
+}
+
 # -- License resolver -------------------------------------------------
 # Defined above the library-mode guard so install-dev.sh (which sources
 # this file with NEOHIVE_LIB_ONLY=1) can call it directly. Priority:
@@ -655,6 +731,22 @@ if [ "${BASH_SOURCE[0]}" != "${0}" ] && [ "${NEOHIVE_LIB_ONLY:-0}" = "1" ]; then
 fi
 
 print_banner
+
+# Parse --license-file / -l flag. Anything else is left for future args
+# or silently dropped (the installer takes no other CLI flags today).
+CLI_LICENSE_FILE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --license-file=*) CLI_LICENSE_FILE="${1#*=}"; shift ;;
+    --license-file|-l)
+      [ $# -lt 2 ] && fail E303 "$1 requires a path argument."
+      CLI_LICENSE_FILE="$2"; shift 2 ;;
+    --) shift; break ;;
+    -*) fail E303 "Unknown argument: $1" ;;
+    *) shift ;;
+  esac
+done
+apply_license_file "$CLI_LICENSE_FILE"
 
 # [1] Platform
 # NeoHive images are published as multi-arch manifest lists - `:cpu`,
