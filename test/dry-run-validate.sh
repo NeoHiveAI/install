@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
-# Dry-run the installer's credential validation paths without pulling
-# images or starting a container. Sources install.sh as a library and
-# exercises:
+# Dry-run the installer's validation paths without pulling images or
+# starting a container. Sources install.sh as a library and exercises:
 #
 #   1. resolve_container_fingerprint  - generates/loads the UUID that
 #      the preflight and runtime will both use.
 #   2. preflight_validate_license     - posts to api.keygen.sh and
 #      reports VALID / NO_MACHINES / rejection / network.
-#   3. docker login ghcr.io           - validates the cached PAT against
-#      the real registry. Restores prior login state when done.
+#   3. docker manifest inspect        - confirms the public Docker Hub
+#      image is reachable without authentication.
 #
 # Inputs (env):
-#   NEOHIVE_LICENSE_KEY   - license to validate. Required unless a
-#                           license is already cached at
+#   NEOHIVE_LICENSE_FILE  - path to a file containing the license key.
+#                           Required unless a key is already cached at
 #                           ~/.cache/neohive/license-key.
-#   NEOHIVE_PAT           - PAT to validate. Falls back to
-#                           ~/.cache/neohive/ghcr-pat when unset.
-#   NEOHIVE_ROTATE_*      - honoured exactly like the real installer.
+#   NEOHIVE_ROTATE_LICENSE - honoured exactly like the real installer.
 #
 # Exit codes: 0 if both validations pass, non-zero otherwise.
 
@@ -53,8 +50,8 @@ separator
 printf '   %s[license]%s validating against api.keygen.sh\n' "$C_BOLD" "$C_RESET"
 LICENSE_KEY="$(resolve_license)"
 if [ -z "$LICENSE_KEY" ]; then
-  printf '      %sFAIL%s  no license key available - set NEOHIVE_LICENSE_KEY or cache one at %s\n' \
-    "$C_RED" "$C_RESET" "$LICENSE_FILE" >&2
+  printf '      %sFAIL%s  no license key available - set NEOHIVE_LICENSE_FILE or cache one at %s\n' \
+    "$C_RED" "$C_RESET" "$LICENSE_CACHE_FILE" >&2
   exit 1
 fi
 info "license key (masked): ${LICENSE_KEY:0:4}***${LICENSE_KEY: -4} (len=${#LICENSE_KEY})"
@@ -64,66 +61,29 @@ else
   LICENSE_RESULT=1
 fi
 
-# -- GHCR PAT ----------------------------------------------------------
+# -- Registry connectivity --------------------------------------------
 separator
-printf '   %s[ghcr]%s validating PAT via docker login\n' "$C_BOLD" "$C_RESET"
+printf '   %s[registry]%s probing public Docker Hub image\n' "$C_BOLD" "$C_RESET"
 
-# Snapshot the docker config so we can leave the system the way we
-# found it; an existing `docker login` for ghcr.io should still be
-# valid when this script exits.
-DOCKER_CFG="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
-RESTORE_CFG=""
-if [ -s "$DOCKER_CFG" ]; then
-  RESTORE_CFG="$(mktemp)"
-  cp -p "$DOCKER_CFG" "$RESTORE_CFG"
-fi
-
-if [ -n "${NEOHIVE_PAT:-}" ]; then
-  PAT="$NEOHIVE_PAT"
-  info "using PAT from NEOHIVE_PAT env var"
-elif [ -s "$PAT_FILE" ]; then
-  PAT="$(cat "$PAT_FILE")"
-  info "using cached PAT at $PAT_FILE"
+# NeoHive images are published to public Docker Hub - no authentication
+# is required to pull or inspect, so this stage just verifies that the
+# registry is reachable and the floating :cpu tag exists.
+REGISTRY_RESULT=0
+if docker manifest inspect "$IMAGE:cpu" >/dev/null 2>&1; then
+  ok "manifest read on $IMAGE:cpu OK"
 else
-  printf '      %sFAIL%s  no PAT available - set NEOHIVE_PAT or run install.sh once to cache one.\n' \
-    "$C_RED" "$C_RESET" >&2
-  PAT_RESULT=1
-  PAT=""
-fi
-
-PAT_RESULT=0
-if [ -n "$PAT" ]; then
-  info "PAT (masked): ${PAT:0:4}***${PAT: -4} (len=${#PAT})"
-  if printf '%s' "$PAT" | docker login ghcr.io -u neohive-service --password-stdin >/dev/null 2>&1; then
-    ok "docker login ghcr.io succeeded"
-    # Also probe a manifest read to confirm read:packages on the image.
-    if docker manifest inspect "$IMAGE:cpu" >/dev/null 2>&1; then
-      ok "manifest read on $IMAGE:cpu OK (token has read:packages)"
-    else
-      warn "docker login OK but manifest inspect on $IMAGE:cpu failed - token may lack read:packages on the image"
-      PAT_RESULT=1
-    fi
-  else
-    printf '      %sFAIL%s  docker login ghcr.io was rejected - PAT revoked or wrong scope\n' \
-      "$C_RED" "$C_RESET" >&2
-    PAT_RESULT=1
-  fi
-fi
-
-# Restore the prior docker config so we don't leave the system in a
-# different login state than we found it.
-if [ -n "$RESTORE_CFG" ] && [ -s "$RESTORE_CFG" ]; then
-  cp -p "$RESTORE_CFG" "$DOCKER_CFG"
-  rm -f "$RESTORE_CFG"
+  printf '      %sFAIL%s  manifest inspect on %s:cpu failed - Docker Hub unreachable or image missing\n' \
+    "$C_RED" "$C_RESET" "$IMAGE" >&2
+  REGISTRY_RESULT=1
 fi
 
 # -- Summary -----------------------------------------------------------
 separator
-if [ "$LICENSE_RESULT" -eq 0 ] && [ "$PAT_RESULT" -eq 0 ]; then
+if [ "$LICENSE_RESULT" -eq 0 ] && [ "$REGISTRY_RESULT" -eq 0 ]; then
   printf '   %sALL VALIDATIONS PASSED%s\n\n' "$C_GREEN$C_BOLD" "$C_RESET"
   exit 0
 fi
 [ "$LICENSE_RESULT" -ne 0 ] && printf '   %sFAIL%s license preflight\n' "$C_RED" "$C_RESET" >&2
-[ "$PAT_RESULT" -ne 0 ] && printf '   %sFAIL%s PAT validation\n' "$C_RED" "$C_RESET" >&2
+[ "$REGISTRY_RESULT" -ne 0 ] && printf '   %sFAIL%s registry probe\n' "$C_RED" "$C_RESET" >&2
 printf '\n'
 exit 1

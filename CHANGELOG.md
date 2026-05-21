@@ -8,6 +8,61 @@ is reference material for users who want the details.
 The format follows [Keep a Changelog](https://keepachangelog.com/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## v1.5.0 — 2026-05-21
+
+### Release overview
+The biggest NeoHive release to date. License-based activation, a faster
+vector store, a redesigned onboarding flow, smarter MCP responses, and
+a friction-free install experience. Existing installs upgrade in
+place — re-run the installer and the gateway picks up where it left off.
+
+### Activation
+- License-based activation, with up to 72 hours of offline grace if
+  our licensing service is briefly unreachable.
+- Moving NeoHive to a new machine no longer leaves a stale seat
+  behind — the next install picks up the freed slot automatically.
+- New Settings → Licence page shows current state, expiry, grace
+  remaining, and self-serve licence rotation.
+
+### Performance
+- Recall on hives of a few thousand or more memories is significantly
+  faster.
+- Dashboard navigation and project switching feel snappier across
+  the board.
+- `memory_store` now accepts content well past the previous size
+  limit — long bodies are chunked automatically.
+- Smarter routing of code, markdown, prose, and PDFs to the right
+  indexer on the way in.
+
+### MCP and Claude
+- Claude is materially better at reusing recalled memories across
+  long conversations.
+- Claude picks the right memory tool more often without prompting,
+  especially for codebase search and subagent flows.
+- The MCP install step in onboarding works with any client — Claude
+  Code, Cursor, Codex, etc. — and advances on its own once your
+  editor connects.
+
+### Onboarding and dashboard
+- Refreshing the page mid-setup resumes where you left off rather
+  than restarting the wizard.
+- Repo onboarding shows live clone and indexing progress as it
+  runs.
+- Dashboards with many open hives stay smoother on slow networks.
+- The update banner now shows release highlights, links to the full
+  changelog, and adds a manual "Check now" button.
+
+### Install
+- Install now uses a license file instead of an access token. The
+  previous access tokens have been revoked — install using the
+  license file provided by the NeoHive team.
+
+### Fixes
+- Long syncs no longer get interrupted by idle suspension, and
+  scheduled syncs wake their worker on time.
+- Reinstalling on the same machine no longer burns a fresh licence
+  seat each time.
+
 ## v1.4.10 — 2026-05-14
 
 ### Release overview

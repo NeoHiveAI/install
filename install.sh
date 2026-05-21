@@ -8,11 +8,19 @@
 # Environment overrides (all optional):
 #   NEOHIVE_BACKEND            - force backend: cpu|vulkan|cuda|rocm (default: autodetect)
 #   NEOHIVE_PORT               - port to publish (default: 3577)
-#   NEOHIVE_PAT                - GHCR token; required when stdin is not a TTY
-#   NEOHIVE_ROTATE_PAT         - set to 1 to force re-prompt even if cached PAT exists
-#   NEOHIVE_LICENSE_KEY        - Keygen license key; required when stdin is not a TTY
-#   NEOHIVE_ROTATE_LICENSE     - set to 1 to force re-read of license (skip cache)
-#   NEOHIVE_UPDATE_REPO        - override the GHCR repo for in-app update checks
+#   NEOHIVE_LICENSE_FILE       - path to your NeoHive license file (.key or .json).
+#                                Equivalent to passing --license-file. The installer
+#                                also auto-detects license.json / license.key in the
+#                                current working directory and alongside install.sh
+#                                if no flag / env var is provided. Interactive mode
+#                                prompts for the path when no source resolves.
+#   NEOHIVE_LICENSE_KEY        - raw license key. Set by apply_license_file after
+#                                reading whichever source resolved, but operators
+#                                can also export it directly for non-file workflows.
+#   NEOHIVE_ROTATE_LICENSE     - set to 1 to force re-read of the license file
+#                                even when the cached key is present
+#   NEOHIVE_UPDATE_REPO        - override the Docker Hub repo for in-app update
+#                                checks (default: neohivedev/neohive)
 #   NEOHIVE_PDF_BRIDGE_TIMEOUT_MS  - docling PDF bridge per-document timeout in ms
 #                                    (default 300000 = 5 min). Raise this for very
 #                                    large PDFs - a 900-page document can need
@@ -28,10 +36,11 @@
 #                                    chonkie/Rust splitter, not docling.
 #                                    Forwarded as MEMVEC_CHUNKER_TIMEOUT_MS.
 #
-# The PAT is cached at $XDG_CACHE_HOME/neohive/ghcr-pat (or ~/.cache/neohive/
-# if XDG is unset) with mode 0600 so the customer does not re-paste on
-# upgrade. The license key is cached at $CACHE_DIR/license-key, same mode.
-# Re-running the script is the supported upgrade path.
+# The license key extracted from NEOHIVE_LICENSE_FILE is cached at
+# $XDG_CACHE_HOME/neohive/license-key (or ~/.cache/neohive/ if XDG is unset)
+# with mode 0600 so the customer does not re-supply on upgrade. Re-running
+# the script is the supported upgrade path. The Docker Hub image is public,
+# so no registry access token is required.
 #
 # The server serves plain HTTP on a single port. Customers who need TLS
 # wrap their MCP endpoint with the mcp-remote npm package on the client
@@ -39,12 +48,14 @@
 
 set -euo pipefail
 
-IMAGE="ghcr.io/neohiveai/neohive"
+IMAGE="docker.io/neohivedev/neohive"
+# Repository path used by the Docker Hub Hub API for tag enumeration. Kept
+# in lockstep with $IMAGE so a future rename only needs one edit here.
+DOCKERHUB_REPO="neohivedev/neohive"
 CONTAINER_NAME="neohive"
 VOLUME_NAME="neohive-data"
 DEFAULT_PORT=3577
 HEALTH_TIMEOUT_SECONDS=60
-MAX_LOGIN_ATTEMPTS=3
 
 # Keygen account + product UUIDs baked at Phase 0 dashboard setup.
 # Account scopes the API namespace; product is required by Keygen's
@@ -70,8 +81,7 @@ CHANGELOG_VIEW_URL="https://github.com/NeoHiveAI/install/blob/main/CHANGELOG.md"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/neohive"
-PAT_FILE="$CACHE_DIR/ghcr-pat"
-LICENSE_FILE="$CACHE_DIR/license-key"
+LICENSE_CACHE_FILE="$CACHE_DIR/license-key"
 PORT="${NEOHIVE_PORT:-$DEFAULT_PORT}"
 
 # Detected once near boot, before docker rm/run rewrite the world.
@@ -129,8 +139,8 @@ print_banner() {
 #           Code scheme:
 #             E1xx = build/release bug (placeholder config, missing baked-in IDs)
 #             E2xx = user environment (OS, docker, TTY, bad backend)
-#             E3xx = license (rejected, empty, no key)
-#             E4xx = registry/auth (PAT, ghcr login)
+#             E3xx = license (rejected, empty, missing/unreadable file)
+#             E4xx = registry (Docker Hub API failures, rate limits)
 #             E5xx = image resolution / pull
 #             E6xx = runtime (health timeout, machine-id, env vars)
 step() {
@@ -212,8 +222,7 @@ print_post_install() {
   printf '       %sdocker logs -f %s%s\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
   printf '       %sdocker restart %s%s\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
   printf '\n'
-  printf '     Upgrade:        re-run this installer (cached token is reused).\n'
-  printf '     Rotate token:   %sNEOHIVE_ROTATE_PAT=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
+  printf '     Upgrade:        re-run this installer (cached license is reused).\n'
   printf '     Rotate license: %sNEOHIVE_ROTATE_LICENSE=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
   printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
 }
@@ -300,7 +309,7 @@ print_post_install_update() {
   printf '     Container ops:\n'
   printf '       %sdocker logs -f %s%s\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
   printf '       %sdocker restart %s%s\n\n' "$C_DIM" "$CONTAINER_NAME" "$C_RESET"
-  printf '     Rotate token:   %sNEOHIVE_ROTATE_PAT=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
+  printf '     Rotate license: %sNEOHIVE_ROTATE_LICENSE=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
   printf '   %s%s%s\n\n' "$C_DIM" "$line" "$C_RESET"
 }
 
@@ -343,31 +352,30 @@ try_pull_tag() {
 }
 
 # List versioned tags for a tag suffix (e.g. "cpu" or "cpu-arm64"),
-# newest first. Uses the Docker Registry v2 API on GHCR: first trade
-# the PAT for a short-lived bearer at /token, then list tags. Returns
-# empty on any registry or parse error - the caller treats that as
-# "no older versions" rather than aborting, so a flaky network at
-# list time still lets stage-1 floating tags succeed.
+# newest first. Uses the Docker Hub Hub API for public repositories —
+# unauthenticated, no token trade required. Returns empty on any
+# registry or parse error so the caller can treat it as "no older
+# versions" rather than aborting; a flaky network at list time still
+# lets stage-1 floating tags succeed.
 list_versioned_tags() {
   local suffix="$1"
-  local bearer tags_json
-  bearer="$(curl -fsSL \
-    -u "neohive-service:$PAT" \
-    "https://ghcr.io/token?scope=repository:neohiveai/neohive:pull" \
-    2>/dev/null | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
-  [ -z "$bearer" ] && return 0
-  tags_json="$(curl -fsSL \
-    -H "Authorization: Bearer $bearer" \
-    "https://ghcr.io/v2/neohiveai/neohive/tags/list" 2>/dev/null)"
+  local tags_json
+  tags_json="$(curl -fsSL --max-time 10 \
+    "https://hub.docker.com/v2/repositories/$DOCKERHUB_REPO/tags/?page_size=100" \
+    2>/dev/null)"
   [ -z "$tags_json" ] && return 0
   # Filter out pre-release tags so a versioned pre-release that leaked
-  # into GHCR cannot be promoted to a fresh customer via sort -rV.
+  # into Docker Hub cannot be promoted to a fresh customer via sort -rV.
   # sort -V does not implement semver pre-release ordering - it would
   # rank v1.4.5-rc1 above v1.4.4. See PRERELEASE_TAG_PATTERN at the
   # top of this file for the canonical pattern.
+  #
+  # Docker Hub encodes tag names as "name":"<tag>". Anchoring on `"name":"`
+  # keeps the parse robust against the rest of each tag record
+  # (architectures, digests, last_updated, ...).
   printf '%s' "$tags_json" \
     | tr ',' '\n' \
-    | sed -n 's/.*"\(v[0-9][^"]*-'"$suffix"'\)".*/\1/p' \
+    | sed -n 's/.*"name":"\(v[0-9][^"]*-'"$suffix"'\)".*/\1/p' \
     | grep -vE -- "$PRERELEASE_TAG_PATTERN" \
     | sort -rV
 }
@@ -495,42 +503,67 @@ apply_license_file() {
 # -- License resolver -------------------------------------------------
 # Defined above the library-mode guard so install-dev.sh (which sources
 # this file with NEOHIVE_LIB_ONLY=1) can call it directly. Priority:
-# env > cache (unless NEOHIVE_ROTATE_LICENSE=1) > TTY prompt.
+# NEOHIVE_LICENSE_KEY env > cache (unless NEOHIVE_ROTATE_LICENSE=1) > TTY prompt
+# for a file path.
+#
+# `apply_license_file` runs earlier in the main flow and writes
+# NEOHIVE_LICENSE_KEY out of any of {--license-file, NEOHIVE_LICENSE_FILE,
+# auto-detected license.json/license.key in CWD or script dir}. By the
+# time this function is called the env-var branch has already absorbed
+# all the file-resolution paths, so we only handle the env var, the
+# cache, and the interactive fallback.
 #
 # stdout is the license key. All status lines go to stderr to avoid
-# corrupting the value passed to curl.
+# corrupting the value passed downstream to curl / docker run.
 resolve_license() {
+  local src_path key
   if [ -n "${NEOHIVE_LICENSE_KEY:-}" ]; then
     info "Using license key from NEOHIVE_LICENSE_KEY env var" >&2
-    printf '%s' "$NEOHIVE_LICENSE_KEY"
+    key="$NEOHIVE_LICENSE_KEY"
+  elif [ "${NEOHIVE_ROTATE_LICENSE:-0}" != "1" ] && [ -s "$LICENSE_CACHE_FILE" ]; then
+    info "Using cached license key at $LICENSE_CACHE_FILE" >&2
+    cat "$LICENSE_CACHE_FILE"
     return
+  else
+    if [ ! -t 0 ]; then
+      fail E301 "No license. Set NEOHIVE_LICENSE_FILE (or pass --license-file), or drop a license.key / license.json next to install.sh, or run interactively. Contact hello@neohive.ai for your license."
+    fi
+    printf '      %sPath to your NeoHive license file:%s ' "$C_BOLD" "$C_RESET" >&2
+    read -r src_path
+    # Expand a leading ~ and ~user against the shell's tilde rules so a
+    # pasted "~/Downloads/neohive.license" Just Works in interactive mode.
+    case "$src_path" in
+      "~"|"~/"*) src_path="${HOME}${src_path#\~}" ;;
+    esac
+    if [ -z "$src_path" ]; then
+      fail E302 "Empty path."
+    fi
+    if [ ! -f "$src_path" ] || [ ! -r "$src_path" ]; then
+      fail E301 "$src_path is not a readable file. Verify the path and re-run."
+    fi
+    # Delegate parsing to read_license_file so .json files get the same
+    # jq/grep extraction the non-interactive paths use. It writes the
+    # extracted value into NEOHIVE_LICENSE_KEY.
+    read_license_file "$src_path"
+    key="$NEOHIVE_LICENSE_KEY"
+    info "Read license key from $src_path" >&2
   fi
-  if [ "${NEOHIVE_ROTATE_LICENSE:-0}" != "1" ] && [ -s "$LICENSE_FILE" ]; then
-    info "Using cached license key at $LICENSE_FILE" >&2
-    cat "$LICENSE_FILE"
-    return
-  fi
-  if [ ! -t 0 ]; then
-    fail E301 "No license key. Set NEOHIVE_LICENSE_KEY or run interactively. Contact hello@neohive.ai for a key."
-  fi
-  printf '      %sPaste your NeoHive license key (input hidden):%s ' "$C_BOLD" "$C_RESET" >&2
-  read -rs LICENSE_INPUT
-  printf '\n' >&2
-  if [ -z "$LICENSE_INPUT" ]; then
-    fail E302 "Empty license key."
-  fi
+
+  # Cache the extracted key contents so upgrades / restarts don't need
+  # the original file path again. The cache is what subsequent installs
+  # read from when neither env var nor rotation is set.
   if ! mkdir -p "$CACHE_DIR" 2>/dev/null; then
     warn "Cannot create $CACHE_DIR - license key will not be persisted"
   else
-    chmod 700 "$CACHE_DIR"
-    if printf '%s' "$LICENSE_INPUT" > "$LICENSE_FILE" 2>/dev/null; then
-      chmod 600 "$LICENSE_FILE"
-      info "License key cached to $LICENSE_FILE" >&2
+    chmod 700 "$CACHE_DIR" 2>/dev/null || true
+    if printf '%s' "$key" > "$LICENSE_CACHE_FILE" 2>/dev/null; then
+      chmod 600 "$LICENSE_CACHE_FILE" 2>/dev/null || true
+      info "License key cached to $LICENSE_CACHE_FILE" >&2
     else
-      warn "Cannot write $LICENSE_FILE - license key will not be persisted"
+      warn "Cannot write $LICENSE_CACHE_FILE - license key will not be persisted"
     fi
   fi
-  printf '%s' "$LICENSE_INPUT"
+  printf '%s' "$key"
 }
 
 # Resolve the fingerprint the gateway will use at boot. The gateway reads
@@ -663,7 +696,7 @@ preflight_validate_license() {
 
   if [ "$status" -ge 400 ] && [ "$status" -lt 500 ] 2>/dev/null; then
     detail=$(echo "$body" | grep -oE '"detail":"[^"]*"' | head -n1 | cut -d'"' -f4)
-    rm -f "$LICENSE_FILE"
+    rm -f "$LICENSE_CACHE_FILE"
     warn "License rejected by Keygen (HTTP $status): ${detail:-unknown}"
     return 1
   fi
@@ -684,7 +717,7 @@ preflight_validate_license() {
   fi
 
   detail=$(echo "$body" | grep -oE '"detail":"[^"]*"' | head -n1 | cut -d'"' -f4)
-  rm -f "$LICENSE_FILE"
+  rm -f "$LICENSE_CACHE_FILE"
   warn "License rejected by Keygen: ${detail:-unknown}"
   return 1
 }
@@ -703,16 +736,16 @@ license_resolve_and_validate() {
       return 0
     fi
     if [ ! -t 0 ]; then
-      fail E303 "License rejected and stdin is not a TTY - cannot re-prompt. Set NEOHIVE_LICENSE_KEY to a valid key and retry."
+      fail E303 "License rejected and stdin is not a TTY - cannot re-prompt. Point NEOHIVE_LICENSE_FILE at a valid license file and retry."
     fi
     if [ $attempt -ge $max_attempts ]; then
       fail E304 "License rejected after $max_attempts attempts. Contact hello@neohive.ai."
     fi
-    warn "Attempt $attempt of $max_attempts failed - re-prompting for license key"
+    warn "Attempt $attempt of $max_attempts failed - re-prompting for license file path"
     # Force a fresh prompt: cache was rm'd in preflight, but a stale
-    # NEOHIVE_LICENSE_KEY env var would short-circuit resolve_license
-    # straight back to the bad value. Unset it for retries.
-    unset NEOHIVE_LICENSE_KEY
+    # NEOHIVE_LICENSE_KEY / NEOHIVE_LICENSE_FILE env var would short-circuit
+    # back to the bad value. Unset both for retries.
+    unset NEOHIVE_LICENSE_KEY NEOHIVE_LICENSE_FILE
     export NEOHIVE_ROTATE_LICENSE=1
     attempt=$((attempt + 1))
   done
@@ -777,10 +810,10 @@ info "Docker ${DOCKER_VERSION:-(unknown version)} - daemon reachable"
 ok
 
 # [3] License resolution
-# Priority: env var > cache (unless rotate set) > interactive TTY prompt.
-# Non-TTY without env var fails fast - the container refuses to boot
+# Priority: NEOHIVE_LICENSE_FILE env > cache (unless rotate set) > TTY prompt.
+# Non-TTY without the env var fails fast - the container refuses to boot
 # without a key, so failing here saves the customer a 2GB pull.
-step 3 "Resolving license key..."
+step 3 "Reading license file..."
 LICENSE_KEY="$(resolve_license)"
 ok
 
@@ -791,8 +824,8 @@ ok
 # Acceptable codes: VALID (already activated for this fingerprint),
 # NO_MACHINES (first install - gateway will activate at boot), and
 # FINGERPRINT_SCOPE_MISMATCH (same: gateway will activate).
-# On 4xx rejection: re-prompt up to 3 times (TTY only) so a typo or a
-# rotated key does not force the user to restart the installer.
+# On 4xx rejection: re-prompt up to 3 times (TTY only) so a typo'd
+# path or rotated key does not force the user to restart the installer.
 step 4 "Validating license..."
 if ! preflight_validate_license; then
   license_resolve_and_validate
@@ -859,77 +892,7 @@ if [ "$FORCED" -eq 1 ]; then
 fi
 ok "using '$BACKEND' backend"
 
-# [6] PAT resolution
-step 6 "Resolving access token..."
-resolve_pat() {
-  # This function's STDOUT is the PAT. Status messages go to stderr
-  # only - a stray newline on stdout corrupts the token and makes
-  # docker login fail with a misleading error.
-  if [ -n "${NEOHIVE_PAT:-}" ]; then
-    info "Using token from NEOHIVE_PAT env var" >&2
-    printf '%s' "$NEOHIVE_PAT"
-    return
-  fi
-  if [ "${NEOHIVE_ROTATE_PAT:-}" != "1" ] && [ -s "$PAT_FILE" ]; then
-    info "Using cached token at $PAT_FILE" >&2
-    cat "$PAT_FILE"
-    return
-  fi
-  if [ ! -t 0 ]; then
-    fail E401 "No PAT available. Set NEOHIVE_PAT=ghp_... or run interactively (stdin must be a TTY)."
-  fi
-  printf '      %sPaste your NeoHive GHCR access token (input hidden):%s ' "$C_BOLD" "$C_RESET" >&2
-  read -rs PAT_INPUT
-  printf '\n' >&2
-  if [ -z "$PAT_INPUT" ]; then
-    fail E403 "Empty token."
-  fi
-  if ! mkdir -p "$CACHE_DIR" 2>/dev/null; then
-    warn "Cannot create $CACHE_DIR - token will not be persisted"
-  else
-    chmod 700 "$CACHE_DIR"
-    if printf '%s' "$PAT_INPUT" > "$PAT_FILE" 2>/dev/null; then
-      chmod 600 "$PAT_FILE"
-      info "Token cached to $PAT_FILE" >&2
-    else
-      warn "Cannot write $PAT_FILE - token will not be persisted"
-    fi
-  fi
-  printf '%s' "$PAT_INPUT"
-}
-PAT="$(resolve_pat)"
-ok
-
-# [7] Authenticate
-# On rejection we clear the cached token and re-prompt up to
-# MAX_LOGIN_ATTEMPTS times. If NEOHIVE_PAT was set explicitly we cannot
-# re-prompt over an env-driven value, so we fail fast with the specific
-# reason. Non-TTY runs likewise cannot recover - they must pass a valid
-# NEOHIVE_PAT and retry.
-step 7 "Authenticating to GHCR..."
-LOGIN_ATTEMPT=0
-while :; do
-  LOGIN_ATTEMPT=$((LOGIN_ATTEMPT + 1))
-  if printf '%s' "$PAT" | docker login ghcr.io -u neohive-service --password-stdin >/dev/null 2>&1; then
-    break
-  fi
-  rm -f "$PAT_FILE"
-  if [ -n "${NEOHIVE_PAT:-}" ]; then
-    fail E402 "docker login ghcr.io rejected the token from NEOHIVE_PAT. Check it has 'read:packages' scope on $IMAGE."
-  fi
-  if [ "$LOGIN_ATTEMPT" -ge "$MAX_LOGIN_ATTEMPTS" ]; then
-    fail E404 "docker login ghcr.io failed after $MAX_LOGIN_ATTEMPTS attempts. The token may be revoked or lack 'read:packages' scope on $IMAGE."
-  fi
-  if [ ! -t 0 ]; then
-    fail E405 "docker login ghcr.io failed and stdin is not a TTY (cannot re-prompt). Pass a valid NEOHIVE_PAT and retry."
-  fi
-  warn "GHCR rejected that token. Let's try a different one (attempt $((LOGIN_ATTEMPT + 1)) of $MAX_LOGIN_ATTEMPTS)."
-  NEOHIVE_ROTATE_PAT=1
-  PAT="$(resolve_pat)"
-done
-ok "ghcr.io/neohive-service"
-
-# [8] Pull
+# [6] Pull
 # Resolution order:
 #   1. Floating per-backend tag (:cpu, :cuda, :vulkan, :rocm) via the
 #      fallback chain in resolve_with_suffix - each is a multi-arch
@@ -942,7 +905,7 @@ ok "ghcr.io/neohive-service"
 # A forced backend (NEOHIVE_BACKEND set) skips fallback entirely and
 # fails on a single missed pull, so the override is never silently
 # downgraded.
-step 8 "Pulling container image..."
+step 6 "Pulling container image..."
 RESOLVED_TAG=""
 if [ "$FORCED" -eq 1 ]; then
   if try_pull_tag "$BACKEND"; then
@@ -954,11 +917,11 @@ else
   resolve_with_suffix "" || true
 fi
 if [ -z "$RESOLVED_TAG" ]; then
-  fail E502 "no compatible image found on $IMAGE. Check your PAT's repo access and retry."
+  fail E502 "no compatible image found on $IMAGE. Check connectivity to Docker Hub and retry."
 fi
 ok "image ready ($RESOLVED_TAG)"
 
-# [9] Run
+# [7] Run
 # Detect upgrade vs fresh install BEFORE we tear down the existing
 # container. Presence of the data volume is the durable signal - the
 # container may have been `docker rm`'d but a returning user's data
@@ -968,7 +931,7 @@ IS_UPDATE=0
 if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
   IS_UPDATE=1
 fi
-step 9 "Starting NeoHive server..."
+step 7 "Starting NeoHive server..."
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   info "Stopping existing container for upgrade..."
   docker rm -f "$CONTAINER_NAME" >/dev/null
@@ -980,13 +943,9 @@ RUN_ARGS=(
   -v "$VOLUME_NAME:/app/data"
   -p "$PORT:3577"
   -e NEOHIVE_LICENSE_KEY="$LICENSE_KEY"
-  # Forward the GHCR PAT so the server's in-app update check can query
-  # the same registry we just pulled from. Without this the banner stays
-  # blank with "NEOHIVE_PAT not set". The host-side `docker login` only
-  # authenticates the pull; the daemon does not pass that into the
-  # container.
-  -e "NEOHIVE_PAT=$PAT"
-  # Keygen account ID, product ID, API URL, and grace-hours are
+  # The in-app update checker queries the public Docker Hub Hub API for
+  # new tags, so no registry credentials are forwarded into the container.
+  # Keygen account ID, product ID, API URL, and grace-hours are also
   # intentionally NOT forwarded as env vars - they are baked into the
   # image so they cannot be overridden at runtime.
 )
