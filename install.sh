@@ -560,6 +560,7 @@ resolve_license() {
     read -r src_path
     # Expand a leading ~ and ~user against the shell's tilde rules so a
     # pasted "~/Downloads/neohive.license" Just Works in interactive mode.
+    # shellcheck disable=SC2088  # literal "~" in case patterns is intentional (matching user input, not expanding)
     case "$src_path" in
       "~"|"~/"*) src_path="${HOME}${src_path#\~}" ;;
     esac
