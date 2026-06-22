@@ -37,16 +37,20 @@ curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh -
 bash /tmp/neohive-install.sh
 ```
 
-You need a NeoHive license file — Logilica issues this from the
-dashboard. Plain-text (`license.key`) and JSON (`license.json`)
-formats are both supported. The installer finds the license through
-the first path that resolves:
+A license key is **optional**. With no key, NeoHive installs and runs in
+**Demo mode** — the free tier, with a small cap on projects and hives. Add a
+key any time to unlock the full product in place (no reinstall, no restart):
+see [Rotate your license](#rotate-your-license). Logilica issues full license
+files from the dashboard. Plain-text (`license.key`) and JSON (`license.json`)
+formats are both supported. The installer finds a license through the first
+path that resolves, and falls back to Demo mode if none do:
 
 1. `--license-file PATH` (or `-l PATH`) command-line flag
 2. `NEOHIVE_LICENSE_FILE=PATH` environment variable
 3. Auto-detected `license.json` or `license.key` in the current
    working directory, then alongside `install.sh`
-4. Interactive prompt for the path
+4. Interactive prompt for the path (press Enter to run Demo)
+5. **Demo mode** — no key supplied; runs the capped free tier
 
 The simplest workflow is to drop the file next to where you're
 running the installer and let auto-detection handle it. The extracted

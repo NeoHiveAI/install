@@ -19,6 +19,14 @@
 #                                can also export it directly for non-file workflows.
 #   NEOHIVE_ROTATE_LICENSE     - set to 1 to force re-read of the license file
 #                                even when the cached key is present
+#   NEOHIVE_TRIAL              - set to 0 to disable the automatic trial
+#                                request when no license is supplied (default: 1).
+#                                Disable in CI to avoid silently consuming trials.
+#   NEOHIVE_EMAIL             - email the trial license is registered to. Required
+#                                for the trial path; prompted for interactively if
+#                                unset. The mint server dedups on it.
+#   NEOHIVE_TRIAL_URL         - override the trial mint server base URL
+#                                (default: https://license.neohive.ai)
 #   NEOHIVE_UPDATE_REPO        - override the Docker Hub repo for in-app update
 #                                checks (default: neohivedev/neohive)
 #   NEOHIVE_PDF_BRIDGE_TIMEOUT_MS  - docling PDF bridge per-document timeout in ms
@@ -84,6 +92,12 @@ CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/neohive"
 LICENSE_CACHE_FILE="$CACHE_DIR/license-key"
 PORT="${NEOHIVE_PORT:-$DEFAULT_PORT}"
 
+# Trial mint server. When no license is supplied (no env var, no cached key,
+# no file) the installer asks this server for a trial keyed to the
+# machine fingerprint. The server holds the Keygen secret; we only ever
+# receive our own trial key back. Gated by NEOHIVE_TRIAL (on by default).
+TRIAL_SERVER_URL="${NEOHIVE_TRIAL_URL:-https://license.neohive.ai}"
+
 # Detected once near boot, before docker rm/run rewrite the world.
 # Presence of the data volume is a more durable signal than the container
 # being alive: a previous `docker rm` would have removed the container
@@ -138,7 +152,8 @@ print_banner() {
 #           Usage: fail Exxx "message"
 #           Code scheme:
 #             E1xx = build/release bug (placeholder config, missing baked-in IDs)
-#             E2xx = user environment (OS, docker, TTY, bad backend)
+#             E2xx = user environment / invocation (OS, docker, TTY,
+#                    bad backend, bad CLI args)
 #             E3xx = license (rejected, empty, missing/unreadable file)
 #             E4xx = registry (Docker Hub API failures, rate limits)
 #             E5xx = image resolution / pull
@@ -524,11 +539,24 @@ resolve_license() {
     info "Using cached license key at $LICENSE_CACHE_FILE" >&2
     cat "$LICENSE_CACHE_FILE"
     return
+  # No env var and no cached key. Try the trial mint server first (gated by
+  # NEOHIVE_TRIAL, on by default) so fresh installs get a trial with no
+  # manual step. fetch_trial_license returns non-zero on any failure, so we
+  # cleanly fall through to the file prompt / demo fallback below.
+  elif [ "${NEOHIVE_TRIAL:-1}" = "1" ] && key="$(fetch_trial_license)" && [ -n "$key" ]; then
+    info "Provisioned a trial license" >&2
   else
+    # No key, no cache, no trial. NeoHive's free floor is DEMO mode: the
+    # gateway boots keyless and serves a capped free tier (no key = demo).
+    # We therefore NEVER fail the install for a missing key - we fall through
+    # to demo. A key can be added later (NEOHIVE_ROTATE_LICENSE=1) to unlock
+    # the full product in place, with no restart.
     if [ ! -t 0 ]; then
-      fail E301 "No license. Set NEOHIVE_LICENSE_FILE (or pass --license-file), or drop a license.key / license.json next to install.sh, or run interactively. Contact hello@neohive.ai for your license."
+      warn "No license key found - installing NeoHive in DEMO mode (free tier)." >&2
+      printf ''
+      return
     fi
-    printf '      %sPath to your NeoHive license file:%s ' "$C_BOLD" "$C_RESET" >&2
+    printf '      %sPath to your NeoHive license file (press Enter to run Demo):%s ' "$C_BOLD" "$C_RESET" >&2
     read -r src_path
     # Expand a leading ~ and ~user against the shell's tilde rules so a
     # pasted "~/Downloads/neohive.license" Just Works in interactive mode.
@@ -536,7 +564,9 @@ resolve_license() {
       "~"|"~/"*) src_path="${HOME}${src_path#\~}" ;;
     esac
     if [ -z "$src_path" ]; then
-      fail E302 "Empty path."
+      warn "No license provided - installing NeoHive in DEMO mode (free tier)." >&2
+      printf ''
+      return
     fi
     if [ ! -f "$src_path" ] || [ ! -r "$src_path" ]; then
       fail E301 "$src_path is not a readable file. Verify the path and re-run."
@@ -653,12 +683,89 @@ resolve_container_fingerprint() {
   printf "%s" "$fp"
 }
 
+# Resolve the email the trial is registered to. The mint server REQUIRES a
+# valid email and dedups on it (as well as fingerprint), so a returning user on
+# a new machine still gets their existing trial, not a second one.
+#
+# Source order: NEOHIVE_EMAIL env > interactive prompt. stdout is the validated,
+# lowercased email; status lines go to stderr. Returns non-zero when no valid
+# email can be obtained (e.g. non-interactive with NEOHIVE_EMAIL unset) so the
+# caller falls through to the manual-license path.
+resolve_trial_email() {
+  local email
+  if [ -n "${NEOHIVE_EMAIL:-}" ]; then
+    email="$NEOHIVE_EMAIL"
+  elif [ -t 0 ]; then
+    printf '      %sEmail for your trial:%s ' "$C_BOLD" "$C_RESET" >&2
+    read -r email
+  else
+    warn "No email for trial (set NEOHIVE_EMAIL) - falling back to manual license"
+    return 1
+  fi
+  email="$(printf '%s' "$email" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  if ! printf '%s' "$email" | grep -qE '^[^@]+@[^@]+\.[^@]+$'; then
+    warn "Invalid email '$email' - falling back to manual license"
+    return 1
+  fi
+  printf '%s' "$email"
+}
+
+# Request a trial license from the mint server, keyed to this machine's
+# fingerprint and the user's email. The server is the only thing holding the
+# Keygen secret and dedups by email/fingerprint server-side, so a reinstall on
+# the same box (or the same user on a new box) returns the SAME trial key — no
+# second free trial, no clock reset.
+#
+# stdout is the trial key on success; status lines go to stderr so the value
+# stays clean for command substitution. Returns non-zero on ANY failure
+# (unreachable, rate-limited, no email, no key) so resolve_license falls through
+# to the manual-license path — the trial is a convenience, never the only route.
+fetch_trial_license() {
+  local fp email resp key
+  fp="$(resolve_container_fingerprint)" || return 1
+  [ -n "$fp" ] || return 1
+  email="$(resolve_trial_email)" || return 1
+  [ -n "$email" ] || return 1
+
+  info "Requesting a trial for $email from $TRIAL_SERVER_URL ..." >&2
+  if ! resp="$(curl -fsS --max-time 10 \
+        -X POST "$TRIAL_SERVER_URL/trial" \
+        -H 'Content-Type: application/json' \
+        -d "{\"fingerprint\":\"$fp\",\"email\":\"$email\"}" 2>/dev/null)"; then
+    warn "Trial request failed (server unreachable or rate-limited) - falling back to manual license"
+    return 1
+  fi
+
+  # Extract .key. Prefer jq; fall back to grep/sed so a missing jq does not
+  # block the trial path (mirrors read_license_file's no-jq tolerance).
+  if command -v jq >/dev/null 2>&1; then
+    key="$(printf '%s' "$resp" | jq -r '.key // empty' 2>/dev/null || true)"
+  else
+    key="$(printf '%s' "$resp" \
+      | grep -o '"key"[[:space:]]*:[[:space:]]*"[^"]*"' \
+      | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/' || true)"
+  fi
+
+  if [ -z "$key" ]; then
+    warn "Trial server returned no key - falling back to manual license"
+    return 1
+  fi
+  printf '%s' "$key"
+}
+
 # Preflight: validate the license against api.keygen.sh before the
 # 2GB pull. Tolerates network/5xx (offline grace will cover at boot).
 # Hard-fails on 4xx and on 200-with-rejection-code so a bad key
 # never gets cached or trusted by the runtime.
 preflight_validate_license() {
   local fp resp body status detail
+
+  # Demo mode (no key): nothing to validate. The gateway boots keyless into
+  # the capped free tier; skip the Keygen round-trip entirely.
+  if [ -z "${LICENSE_KEY:-}" ]; then
+    info "No license key - skipping pre-flight validation (Demo mode)."
+    return 0
+  fi
 
   if [ "$KEYGEN_ACCOUNT_ID" = "REPLACE_WITH_KEYGEN_ACCOUNT_UUID" ] || [ -z "$KEYGEN_ACCOUNT_ID" ]; then
     fail E101 "KEYGEN_ACCOUNT_ID not configured in install.sh (still placeholder). Contact hello@neohive.ai."
@@ -736,17 +843,19 @@ license_resolve_and_validate() {
       return 0
     fi
     if [ ! -t 0 ]; then
-      fail E303 "License rejected and stdin is not a TTY - cannot re-prompt. Point NEOHIVE_LICENSE_FILE at a valid license file and retry."
+      fail E302 "License rejected and stdin is not a TTY - cannot re-prompt. Point NEOHIVE_LICENSE_FILE at a valid license file and retry."
     fi
     if [ $attempt -ge $max_attempts ]; then
-      fail E304 "License rejected after $max_attempts attempts. Contact hello@neohive.ai."
+      fail E310 "License rejected after $max_attempts attempts. Contact hello@neohive.ai."
     fi
     warn "Attempt $attempt of $max_attempts failed - re-prompting for license file path"
-    # Force a fresh prompt: cache was rm'd in preflight, but a stale
-    # NEOHIVE_LICENSE_KEY / NEOHIVE_LICENSE_FILE env var would short-circuit
-    # back to the bad value. Unset both for retries.
+    # Force a fresh prompt for retries. Unset the stale env key/file so they
+    # can't short-circuit back to the bad value, and disable the trial
+    # (NEOHIVE_TRIAL=0) so a rejected trial isn't just re-minted to the same
+    # dead key - control falls through to the license-file prompt instead.
     unset NEOHIVE_LICENSE_KEY NEOHIVE_LICENSE_FILE
     export NEOHIVE_ROTATE_LICENSE=1
+    export NEOHIVE_TRIAL=0
     attempt=$((attempt + 1))
   done
   return 1
@@ -772,10 +881,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --license-file=*) CLI_LICENSE_FILE="${1#*=}"; shift ;;
     --license-file|-l)
-      [ $# -lt 2 ] && fail E303 "$1 requires a path argument."
+      [ $# -lt 2 ] && fail E205 "$1 requires a path argument."
       CLI_LICENSE_FILE="$2"; shift 2 ;;
     --) shift; break ;;
-    -*) fail E303 "Unknown argument: $1" ;;
+    -*) fail E206 "Unknown argument: $1" ;;
     *) shift ;;
   esac
 done
@@ -810,9 +919,10 @@ info "Docker ${DOCKER_VERSION:-(unknown version)} - daemon reachable"
 ok
 
 # [3] License resolution
-# Priority: NEOHIVE_LICENSE_FILE env > cache (unless rotate set) > TTY prompt.
-# Non-TTY without the env var fails fast - the container refuses to boot
-# without a key, so failing here saves the customer a 2GB pull.
+# Priority: NEOHIVE_LICENSE_FILE env > cache (unless rotate set) > trial mint
+# > TTY prompt > DEMO (no key). A missing key never fails the install: the
+# gateway boots keyless into the capped free tier (no key = demo). A key can
+# be rotated in later to unlock the full product with no restart.
 step 3 "Reading license file..."
 LICENSE_KEY="$(resolve_license)"
 ok
@@ -1057,7 +1167,26 @@ print_grace_banner() {
   printf '       not expired%s\n' "$C_RESET"
   printf '   %s%s%s\n\n' "$C_RED" "$bar" "$C_RESET"
 }
-print_license_summary
+# Demo-mode notice: the gateway is running on the free tier (no licence key).
+# Make the operator aware and show how to unlock the full product.
+print_demo_banner() {
+  local bar
+  bar=$(printf '%*s' 67 '' | tr ' ' '=')
+  printf '\n   %s%s%s%s\n' "$C_BOLD" "$C_VIOLET" "$bar" "$C_RESET"
+  printf '   %s%s  Running NeoHive Demo (free tier)%s\n' "$C_BOLD" "$C_VIOLET" "$C_RESET"
+  printf '   %s%s%s\n' "$C_VIOLET" "$bar" "$C_RESET"
+  printf '   No licence key supplied. NeoHive is running with demo limits.\n'
+  printf '   Add a key to unlock the full product (no reinstall, no restart):\n'
+  printf '     %sNEOHIVE_ROTATE_LICENSE=1 bash <(curl ...)%s\n' "$C_DIM" "$C_RESET"
+  printf '   or paste a key in the dashboard under Settings > License.\n'
+  printf '   %s%s%s\n\n' "$C_VIOLET" "$bar" "$C_RESET"
+}
+
+if [ -z "${LICENSE_KEY:-}" ]; then
+  print_demo_banner
+else
+  print_license_summary
+fi
 
 if [ "$IS_UPDATE" -eq 1 ]; then
   print_post_install_update
