@@ -711,44 +711,61 @@ resolve_trial_email() {
   printf '%s' "$email"
 }
 
-# Request a trial license from the mint server, keyed to this machine's
-# fingerprint and the user's email. The server is the only thing holding the
-# Keygen secret and dedups by email/fingerprint server-side, so a reinstall on
-# the same box (or the same user on a new box) returns the SAME trial key — no
-# second free trial, no clock reset.
-#
-# stdout is the trial key on success; status lines go to stderr so the value
-# stays clean for command substitution. Returns non-zero on ANY failure
-# (unreachable, rate-limited, no email, no key) so resolve_license falls through
-# to the manual-license path — the trial is a convenience, never the only route.
+# Request a trial license from the mint server, keyed to fingerprint + email.
+# Trials are create-only: the server mints once, then returns 409 without the
+# key (recovery is manual via hello@neohive.ai). stdout is the key on success;
+# status goes to stderr. Returns non-zero on any failure so resolve_license
+# falls through to the manual-license path.
 fetch_trial_license() {
-  local fp email resp key
+  local fp email resp status body key
   fp="$(resolve_container_fingerprint)" || return 1
   [ -n "$fp" ] || return 1
   email="$(resolve_trial_email)" || return 1
   [ -n "$email" ] || return 1
 
   info "Requesting a trial for $email from $TRIAL_SERVER_URL ..." >&2
-  if ! resp="$(curl -fsS --max-time 10 \
+  # No -f: capture body + status so 409 can be told apart from a network fail.
+  if ! resp="$(curl -sS --max-time 10 -w '\n__HTTP_STATUS__%{http_code}' \
         -X POST "$TRIAL_SERVER_URL/trial" \
         -H 'Content-Type: application/json' \
-        -d "{\"fingerprint\":\"$fp\",\"email\":\"$email\"}" 2>/dev/null)"; then
-    warn "Trial request failed (server unreachable or rate-limited) - falling back to manual license"
+        -d "{\"fingerprint\":\"$fp\",\"email\":\"$email\"}" 2>/dev/null)" || [ -z "$resp" ]; then
+    warn "Trial request failed (server unreachable) - falling back to manual license" >&2
+    return 1
+  fi
+
+  status="${resp##*__HTTP_STATUS__}"
+  body="${resp%__HTTP_STATUS__*}"
+  body="${body%$'\n'}"
+
+  if [ -z "$status" ] || [ "$status" = "000" ]; then
+    warn "Trial request failed (server unreachable) - falling back to manual license" >&2
+    return 1
+  fi
+
+  # 409 = trial already minted for this device/email; server won't re-issue.
+  if [ "$status" = "409" ]; then
+    warn "A trial already exists for this device or email." >&2
+    warn "If you've lost your key, contact hello@neohive.ai to recover it." >&2
+    return 1
+  fi
+
+  if [ "$status" != "200" ]; then
+    warn "Trial server returned HTTP $status - falling back to manual license" >&2
     return 1
   fi
 
   # Extract .key. Prefer jq; fall back to grep/sed so a missing jq does not
   # block the trial path (mirrors read_license_file's no-jq tolerance).
   if command -v jq >/dev/null 2>&1; then
-    key="$(printf '%s' "$resp" | jq -r '.key // empty' 2>/dev/null || true)"
+    key="$(printf '%s' "$body" | jq -r '.key // empty' 2>/dev/null || true)"
   else
-    key="$(printf '%s' "$resp" \
+    key="$(printf '%s' "$body" \
       | grep -o '"key"[[:space:]]*:[[:space:]]*"[^"]*"' \
       | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/' || true)"
   fi
 
   if [ -z "$key" ]; then
-    warn "Trial server returned no key - falling back to manual license"
+    warn "Trial server returned no key - falling back to manual license" >&2
     return 1
   fi
   printf '%s' "$key"
