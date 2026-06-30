@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
-# Smoke-test the installer. Expects NEOHIVE_LICENSE_FILE to point at a
-# file containing a valid Keygen license key. Runs against the cpu
-# variant (no GPU required) on port 13577 (non-default to avoid
-# clobbering a local install).
-#
-# NeoHive images live on public Docker Hub, so no registry credentials
-# are required to exercise the installer end-to-end.
+# Smoke-test the installer. Expects NEOHIVE_PAT to be set in the environment.
+# Runs against the cpu variant (no GPU required) on port 13577 (non-default
+# to avoid clobbering a local install).
 
 set -euo pipefail
 
-if [ -z "${NEOHIVE_LICENSE_FILE:-}" ]; then
-  echo "NEOHIVE_LICENSE_FILE must be set (path to a file containing a license key)." >&2
-  exit 1
-fi
-if [ ! -r "$NEOHIVE_LICENSE_FILE" ]; then
-  echo "NEOHIVE_LICENSE_FILE=$NEOHIVE_LICENSE_FILE is not a readable file." >&2
+if [ -z "${NEOHIVE_PAT:-}" ]; then
+  echo "NEOHIVE_PAT must be set for the smoke test." >&2
   exit 1
 fi
 
+DOCKER_CONFIG="$(mktemp -d)"
+export DOCKER_CONFIG
 TMPCACHE="$(mktemp -d)"
-trap 'rm -rf "$TMPCACHE"; docker rm -f neohive 2>/dev/null || true' EXIT
+trap 'rm -rf "$TMPCACHE" "$DOCKER_CONFIG"; docker rm -f neohive 2>/dev/null || true' EXIT
 
 echo "-- Running installer via process substitution --"
 NEOHIVE_BACKEND=cpu \
