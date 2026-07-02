@@ -1,3 +1,12 @@
+## v1.6.1 (2026-07-02)
+
+## What's Changed
+* fix(gateway): :bug: repair vestigial hiveminds.port column on upgraded DBs (v1.6 hotfix) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/96
+
+
+**Full Changelog**: https://github.com/NeoHiveAI/MemVec/compare/v1.6.0...v1.6.1
+
+
 # Changelog
 
 All notable changes to [NeoHive](https://neohive.ai) are published here.
