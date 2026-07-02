@@ -1,3 +1,12 @@
+## v1.6.2 (2026-07-02)
+
+## What's Changed
+* fix(frontend): :bug: 1.6 FE bug-fixing pass (hive move UI + sync queue labels) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/98
+
+
+**Full Changelog**: https://github.com/NeoHiveAI/MemVec/compare/v1.6.1...v1.6.2
+
+
 # Changelog
 
 All notable changes to [NeoHive](https://neohive.ai) are published here.
