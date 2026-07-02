@@ -138,7 +138,7 @@ print_banner() {
 #           Usage: fail Exxx "message"
 #           Code scheme:
 #             E1xx = build/release bug (placeholder config, missing baked-in IDs)
-#             E2xx = user environment (OS, docker, TTY, bad backend)
+#             E2xx = user environment / invocation (OS, docker, TTY, bad backend, bad CLI args)
 #             E3xx = license (rejected, empty, missing/unreadable file)
 #             E4xx = registry (Docker Hub API failures, rate limits)
 #             E5xx = image resolution / pull
@@ -464,8 +464,15 @@ read_license_file() {
 
 # Resolve a license file path then export NEOHIVE_LICENSE_KEY from it
 # so resolve_license picks it up via the env-var branch. Skipped if
-# NEOHIVE_LICENSE_KEY is already set (env always wins) or if the user
-# asked for rotation (NEOHIVE_ROTATE_LICENSE=1).
+# NEOHIVE_LICENSE_KEY is already set (env always wins).
+#
+# Rotation (NEOHIVE_ROTATE_LICENSE=1) only bypasses the *cache* (handled
+# in resolve_license), not an explicit file: the documented rotate
+# workflow is `NEOHIVE_LICENSE_FILE=/path NEOHIVE_ROTATE_LICENSE=1 ...`,
+# so an explicit --license-file / NEOHIVE_LICENSE_FILE is still honored
+# here under rotation. Only the CWD/script-dir auto-detection is skipped
+# under rotation, so a stale license.json/.key lying around can't
+# silently short-circuit a deliberate re-read.
 #
 # Arg $1: explicit path from CLI flag (may be empty).
 #
@@ -474,14 +481,13 @@ read_license_file() {
 apply_license_file() {
   local cli_path="${1:-}" resolved="" candidate
   [ -n "${NEOHIVE_LICENSE_KEY:-}" ] && return 0
-  [ "${NEOHIVE_ROTATE_LICENSE:-0}" = "1" ] && return 0
   if [ -n "$cli_path" ]; then
     [ -f "$cli_path" ] || fail E308 "--license-file '$cli_path' does not exist."
     resolved="$cli_path"
   elif [ -n "${NEOHIVE_LICENSE_FILE:-}" ]; then
     [ -f "$NEOHIVE_LICENSE_FILE" ] || fail E309 "NEOHIVE_LICENSE_FILE '$NEOHIVE_LICENSE_FILE' does not exist."
     resolved="$NEOHIVE_LICENSE_FILE"
-  else
+  elif [ "${NEOHIVE_ROTATE_LICENSE:-0}" != "1" ]; then
     for candidate in \
       "$PWD/license.json" "$PWD/license.key" \
       "$SCRIPT_DIR/license.json" "$SCRIPT_DIR/license.key"; do
@@ -739,7 +745,7 @@ license_resolve_and_validate() {
       fail E303 "License rejected and stdin is not a TTY - cannot re-prompt. Point NEOHIVE_LICENSE_FILE at a valid license file and retry."
     fi
     if [ $attempt -ge $max_attempts ]; then
-      fail E304 "License rejected after $max_attempts attempts. Contact hello@neohive.ai."
+      fail E310 "License rejected after $max_attempts attempts. Contact hello@neohive.ai."
     fi
     warn "Attempt $attempt of $max_attempts failed - re-prompting for license file path"
     # Force a fresh prompt: cache was rm'd in preflight, but a stale
@@ -772,10 +778,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --license-file=*) CLI_LICENSE_FILE="${1#*=}"; shift ;;
     --license-file|-l)
-      [ $# -lt 2 ] && fail E303 "$1 requires a path argument."
+      [ $# -lt 2 ] && fail E205 "$1 requires a path argument."
       CLI_LICENSE_FILE="$2"; shift 2 ;;
     --) shift; break ;;
-    -*) fail E303 "Unknown argument: $1" ;;
+    -*) fail E206 "Unknown argument: $1" ;;
     *) shift ;;
   esac
 done
