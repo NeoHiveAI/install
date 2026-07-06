@@ -1,3 +1,12 @@
+## v1.6.3 (2026-07-06)
+
+## What's Changed
+* fix(scheduler): :bug: remove orphaned git-sync schedules on hive delete (HIVE-291) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/100
+
+
+**Full Changelog**: https://github.com/NeoHiveAI/MemVec/compare/v1.6.2...v1.6.3
+
+
 # Changelog
 
 All notable changes to [NeoHive](https://neohive.ai) are published here.
