@@ -9,15 +9,14 @@
 #   ARCH=arm64|x86_64|aarch64|...  (default: uname -m)
 #   FORCED=0|1                     (default: 0; set 1 to simulate NEOHIVE_BACKEND)
 #
+# Requires either NEOHIVE_PAT in env or a cached PAT from a prior
+# install run at $XDG_CACHE_HOME/neohive/ghcr-pat (~/.cache/...).
+#
 # Examples:
 #   ./test/dry-run.sh                           # current host, cpu
 #   BACKEND=rocm ./test/dry-run.sh              # simulate a ROCm host
 #   ARCH=arm64 ./test/dry-run.sh                # simulate Apple Silicon
 #   BACKEND=cuda FORCED=1 ./test/dry-run.sh     # simulate NEOHIVE_BACKEND=cuda
-#
-# No registry credentials required — NeoHive images live on public
-# Docker Hub, and `docker manifest inspect` talks to the registry
-# without authentication for public repositories.
 
 set -euo pipefail
 
@@ -39,6 +38,21 @@ try_pull_tag() {
   fi
   return 1
 }
+
+# install.sh's resolve_pat lives inside the main flow (which we
+# skipped), so handle PAT lookup here. Docker login is still required
+# because manifest inspect talks to the registry with the daemon's
+# credentials.
+if [ -n "${NEOHIVE_PAT:-}" ]; then
+  PAT="$NEOHIVE_PAT"
+elif [ -s "$PAT_FILE" ]; then
+  PAT="$(cat "$PAT_FILE")"
+else
+  printf 'No PAT available. Set NEOHIVE_PAT or run install.sh once to cache one.\n' >&2
+  exit 1
+fi
+printf '%s' "$PAT" | docker login ghcr.io -u neohive-service --password-stdin >/dev/null 2>&1 \
+  || { printf 'docker login failed - PAT may be revoked.\n' >&2; exit 1; }
 
 # Scenario inputs.
 ARCH="${ARCH:-$(uname -m)}"

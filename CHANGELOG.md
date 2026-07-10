@@ -1,3 +1,12 @@
+## v1.6.4 (2026-07-10)
+
+## What's Changed
+* fix(chunker): :bug: guard oversized code files from CodeSplitter timeout (HIVE-302) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/107
+
+
+**Full Changelog**: https://github.com/NeoHiveAI/MemVec/compare/v1.6.3...v1.6.4
+
+
 ## v1.6.3 (2026-07-06)
 
 ## What's Changed
