@@ -1,3 +1,12 @@
+## v1.6.5 (2026-07-30)
+
+## What's Changed
+* perf(ingestion): :zap: batch LanceDB writes + deprecate v2-moe on v1.6 (HIVE-321, HIVE-399) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/122
+
+
+**Full Changelog**: https://github.com/NeoHiveAI/MemVec/compare/v1.6.4...v1.6.5
+
+
 ## v1.6.3 (2026-07-06)
 
 ## What's Changed
