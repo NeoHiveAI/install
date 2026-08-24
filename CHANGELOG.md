@@ -1,3 +1,12 @@
+## v1.6.6 (2026-08-24)
+
+## What's Changed
+* fix(re-embed): :ambulance: auto-recover corrupt Lance table + batch re-embed writes by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/189
+
+
+**Full Changelog**: https://github.com/NeoHiveAI/MemVec/compare/v1.6.5...v1.6.6
+
+
 ## v1.6.3 (2026-07-06)
 
 ## What's Changed
