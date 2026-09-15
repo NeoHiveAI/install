@@ -2,9 +2,8 @@
 
 One-shot installer for the [NeoHive](https://neohive.ai) semantic-memory
 server. This repo holds nothing but the shell script and a CI smoke test.
-The server image lives on public Docker Hub — you need a NeoHive license
-file from Logilica to activate it, but no registry credentials are
-required to pull.
+The server itself is a private container image. You need an access token
+from Logilica to pull it.
 
 ## Requirements
 
@@ -37,28 +36,8 @@ curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh -
 bash /tmp/neohive-install.sh
 ```
 
-You need a NeoHive license file — Logilica issues this from the
-dashboard. Plain-text (`license.key`) and JSON (`license.json`)
-formats are both supported. The installer finds the license through
-the first path that resolves:
-
-1. `--license-file PATH` (or `-l PATH`) command-line flag
-2. `NEOHIVE_LICENSE_FILE=PATH` environment variable
-3. Auto-detected `license.json` or `license.key` in the current
-   working directory, then alongside `install.sh`
-4. Interactive prompt for the path
-
-The simplest workflow is to drop the file next to where you're
-running the installer and let auto-detection handle it. The extracted
-key is cached at `~/.cache/neohive/license-key` after first install
-so upgrades don't re-supply the file.
-
-For CI or headless hosts, the env-var form is cleanest:
-
-```sh
-NEOHIVE_LICENSE_FILE=/path/to/neohive.license \
-  bash <(curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh)
-```
+You'll be prompted for your GHCR access token. After first install the token
+is cached at `~/.cache/neohive/ghcr-pat` so upgrades don't re-prompt.
 
 ## Upgrade
 
@@ -81,41 +60,31 @@ or your pilot onboarding contact) so we can fix the underlying backend issue.
 The installer surfaces this command on stderr when a pull or start
 failure looks backend-related.
 
-## Rotate your license
+## Replace the access token
 
-If Logilica issued you a replacement license, drop the new file at the
-same path and force the installer to re-read it:
+If you got a new access token, or accidentally pasted the wrong one when
+the installer first prompted, force a re-prompt:
 
 ```sh
-NEOHIVE_LICENSE_FILE=/path/to/new-neohive.license \
-NEOHIVE_ROTATE_LICENSE=1 \
-  bash <(curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh)
+NEOHIVE_ROTATE_PAT=1 bash <(curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh)
 ```
 
-If Keygen rejects the cached key on validation, the installer also
-clears `~/.cache/neohive/license-key` automatically — so a plain re-run
-with the new file is enough to re-read in that case.
+If `docker login` rejects a cached token, the installer also clears
+`~/.cache/neohive/ghcr-pat` automatically — so a plain re-run is enough
+to re-prompt in that case.
 
 ## Uninstall
 
 ```sh
 docker rm -f neohive
 docker volume rm neohive-data    # destroys all data, run only if you're sure
-rm -f ~/.cache/neohive/license-key
+rm -f ~/.cache/neohive/ghcr-pat
 ```
 
 ## Non-interactive (CI / scripted)
 
 ```sh
-NEOHIVE_LICENSE_FILE=/path/to/neohive.license \
-  curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh | bash
-```
-
-Or, if you've downloaded the script to disk and want to pass the
-license path as a flag rather than an env var:
-
-```sh
-./install.sh --license-file /path/to/neohive.license
+NEOHIVE_PAT=ghp_xxx curl -fsSL https://raw.githubusercontent.com/NeoHiveAI/install/main/install.sh | bash
 ```
 
 ## MCP over HTTPS

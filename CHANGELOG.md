@@ -1,3 +1,12 @@
+## v1.6.7 (2026-09-15)
+
+## What's Changed
+* fix(sync): :bug: stop orphan cleanup from failing the live sync run by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/134
+
+
+**Full Changelog**: https://github.com/NeoHiveAI/MemVec/compare/v1.6.6...v1.6.7
+
+
 ## v1.6.3 (2026-07-06)
 
 ## What's Changed
