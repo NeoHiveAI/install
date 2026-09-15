@@ -1,3 +1,12 @@
+## v1.6.8 (2026-09-15)
+
+## What's Changed
+* feat(ui): :sparkles: tell users when their embedding model was migrated for them by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/136
+
+
+**Full Changelog**: https://github.com/NeoHiveAI/MemVec/compare/v1.6.7...v1.6.8
+
+
 ## v1.6.3 (2026-07-06)
 
 ## What's Changed

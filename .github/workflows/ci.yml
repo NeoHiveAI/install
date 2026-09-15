@@ -1,3 +1,5 @@
+# Managed from the MemVec monorepo (sync-repos/install/src/).
+# Edits made directly in NeoHiveAI/install will be overwritten on the next release sync.
 name: CI
 
 on:
@@ -13,3 +15,5 @@ jobs:
               run: shellcheck install.sh
             - name: ShellCheck smoke.sh
               run: shellcheck test/smoke.sh
+            - name: ShellCheck dry-run.sh
+              run: shellcheck test/dry-run.sh
