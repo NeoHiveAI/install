@@ -38,7 +38,6 @@
 # every expectation holds.
 
 set -euo pipefail
-# shellcheck disable=SC2016  # bash -c '... "$1" ...' takes its args positionally on purpose
 
 cd "$(dirname "$0")/.."
 SCRIPT="$PWD/backup.sh"
@@ -162,6 +161,8 @@ check "per-hive db"          grep -q '/data/hives/h1/cognitive-memory.db$' <<<"$
 check "lance data"           grep -q '/data/hives/h1/vectors.lance/data.lance$' <<<"$LIST"
 check "encryption key"       grep -q '/data/.encryption_key$' <<<"$LIST"
 check "path with spaces"     grep -q '/data/hives/h1/a name with spaces.db$' <<<"$LIST"
+# shellcheck disable=SC2016  # bash -c takes its args positionally as "$1";
+# the single quotes are the point
 check "no macOS ._ files"    bash -c '! grep -q "/\._" <<<"$1"' _ "$LIST"
 EXTRACT="$WORK/extract"; mkdir -p "$EXTRACT"; tar -C "$EXTRACT" -xzf "$ARCHIVE"
 TOP="$(find "$EXTRACT" -mindepth 1 -maxdepth 1 -type d | head -1)"

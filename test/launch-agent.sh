@@ -33,6 +33,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NEOHIVE_LIB_ONLY=1
+# shellcheck source-path=SCRIPTDIR/..  # the cd above happens at run time;
+# this is where shellcheck should look when it reads the source line
 # shellcheck disable=SC1091
 source ./install.sh
 

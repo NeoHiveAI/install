@@ -186,6 +186,7 @@ do_backup() {
   # Expanded now, not when the trap fires: by then this function has
   # returned and its locals are gone, which under set -u would turn the
   # cleanup into an "unbound variable" exit 1 after a successful run.
+  # shellcheck disable=SC2064  # expanding now is the point, see above
   trap "rm -rf '$work'; docker exec '$CONTAINER_NAME' rm -rf /tmp/neohive-snapshot >/dev/null 2>&1 || true" EXIT
   mkdir -p "$work/$name/data"
   sha="$(sha256_tool)"
@@ -286,14 +287,16 @@ do_restore() {
   local work top sha
   work="$(mktemp -d "${TMPDIR:-/tmp}/neohive-restore.XXXXXX")"
   # Expanded now: see the matching note in do_backup.
+  # shellcheck disable=SC2064  # expanding now is the point, see above
   trap "rm -rf '$work'" EXIT
   sha="$(sha256_tool)"
 
   step 1 "Verifying $archive..."
   tar -C "$work" -xzf "$archive" || fail E612 "Could not extract the archive. Is it a neohive-backup-*.tar.gz?"
   top="$(find "$work" -mindepth 1 -maxdepth 1 -type d -name 'neohive-backup-*' | head -1)"
-  [ -n "$top" ] && [ -f "$top/manifest.json" ] && [ -f "$top/SHA256SUMS" ] && [ -d "$top/data" ] \
-    || fail E613 "Archive does not look like a NeoHive backup (missing manifest.json, SHA256SUMS or data/)."
+  if [ -z "$top" ] || [ ! -f "$top/manifest.json" ] || [ ! -f "$top/SHA256SUMS" ] || [ ! -d "$top/data" ]; then
+    fail E613 "Archive does not look like a NeoHive backup (missing manifest.json, SHA256SUMS or data/)."
+  fi
   local fmt
   fmt="$(sed -n 's/.*"format": *\([0-9]*\).*/\1/p' "$top/manifest.json" | head -1)"
   [ "$fmt" = "$FORMAT_VERSION" ] || fail E614 "Backup format $fmt is not supported by this script (expects $FORMAT_VERSION)."

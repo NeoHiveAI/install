@@ -21,7 +21,6 @@
 # No network, no Docker. Exit 0 when every expectation holds.
 
 set -euo pipefail
-# shellcheck disable=SC2016  # bash -c '... "$1" ...' takes its args positionally on purpose
 
 cd "$(dirname "$0")/.."
 SCRIPT="$PWD/logs.sh"
@@ -118,6 +117,8 @@ in_bundle() { grep -rqF -- "$1" "$BUNDLE"; }
 in_file() { grep -qF -- "$2" "$BUNDLE/$1"; }
 
 printf '\n-- the key must appear nowhere\n'
+# shellcheck disable=SC2016  # bash -c takes its args positionally as "$1";
+# the single quotes are the point
 check "licence key absent from every file"       bash -c '! grep -rqF -- "$1" "$2"' _ "$KEY" "$BUNDLE"
 check "inspect env value replaced"               in_file container/docker-inspect.json 'NEOHIVE_LICENSE_KEY=[REDACTED]'
 check "container log line replaced"              in_file container/docker-logs.txt 'NEOHIVE_LICENSE_KEY=[REDACTED]'
@@ -152,9 +153,17 @@ check "worker version kept"        in_file metal-worker/version.txt 'v1.7.0'
 printf '\n-- presence only, never the files\n'
 check "license.txt says present"   in_file license.txt 'license-key: present'
 check "machine-id hashed only"     in_file license.txt 'sha256 prefix'
+# shellcheck disable=SC2016  # bash -c takes its args positionally as "$1";
+# the single quotes are the point
 check "raw fingerprint absent"     bash -c '! grep -rqF -- "fingerprint-uuid-1234" "$1"' _ "$BUNDLE"
+# shellcheck disable=SC2016  # bash -c takes its args positionally as "$1";
+# the single quotes are the point
 check "no license-key file copied" bash -c '! find "$1" -name license-key | grep -q .' _ "$BUNDLE"
+# shellcheck disable=SC2016  # bash -c takes its args positionally as "$1";
+# the single quotes are the point
 check "no database copied"         bash -c '! find "$1" -name "*.db" | grep -q .' _ "$BUNDLE"
+# shellcheck disable=SC2016  # bash -c takes its args positionally as "$1";
+# the single quotes are the point
 check "no lance data copied"       bash -c '! find "$1" -name "*.lance" | grep -q .' _ "$BUNDLE"
 
 printf '\n-- output points at the archive\n'

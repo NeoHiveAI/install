@@ -153,6 +153,7 @@ seed_home
 run_uninstall --purge-data --yes >/dev/null 2>&1
 check "volume removed"                 calls_have "^docker volume rm neohive-data$"
 check "cache dir removed"              test ! -e "$HOME/.cache/neohive"
+# shellcheck disable=SC2088  # the tilde is in the label text, not in a path
 check "~/.neohive removed"             test ! -e "$HOME/.neohive"
 check "container removed"              calls_have "^docker rm -f neohive$"
 

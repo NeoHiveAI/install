@@ -77,6 +77,10 @@ fi
 # -- Logging helpers (mirror install.sh; same Exxx code scheme) --------
 step() { printf '%s[%s]%s %s\n' "$C_CYAN" "$1" "$C_RESET" "$2"; }
 info() { printf '      %s\n' "$*"; }
+# ok() is copied verbatim from install.sh so the ops scripts print alike.
+# This script happens to have no call site that passes the optional detail
+# string, which reads to shellcheck as an argument nobody uses.
+# shellcheck disable=SC2120
 ok() {
   if [ $# -gt 0 ] && [ -n "$1" ]; then
     printf '      %sOK%s  %s\n' "$C_GREEN" "$C_RESET" "$1"

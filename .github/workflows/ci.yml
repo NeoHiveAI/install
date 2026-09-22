@@ -9,12 +9,48 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
-            - name: ShellCheck install.sh
-              run: shellcheck install.sh
-            - name: ShellCheck ops scripts
-              run: shellcheck uninstall.sh backup.sh logs.sh
-            - name: ShellCheck test scripts
-              run: shellcheck test/smoke.sh test/dry-run.sh test/dry-run-validate.sh test/resolver-arch.sh test/pull-diagnosis.sh test/launch-agent.sh test/metal-worker-probe.sh test/ops-redaction.sh test/ops-uninstall.sh test/ops-backup.sh test/ops-logs.sh test/ops-backup-roundtrip.sh
+
+            # This file is generated. An edit made here is replaced the next
+            # time it is published, so a change has to be made at its source.
+            #
+            # shellcheck is pinned and its download checked against a digest
+            # rather than taken from the runner, so this job and the check these
+            # scripts pass before publication reach the same verdict on the same
+            # code. A runner-supplied shellcheck drifts between the two, and the
+            # difference reads as a finding that passes one and fails the other.
+            # Bump the version and the digest together.
+            #
+            # test/*.sh is a glob rather than a list of filenames so that a new
+            # test script is linted the day it is added. A list goes stale
+            # silently: the run still passes, having checked one file fewer.
+            - name: ShellCheck
+              env:
+                  SHELLCHECK_VERSION: 0.11.0
+                  # A version tag names a release; it does not pin its bytes. The
+                  # owner of any GitHub project can replace an asset under an
+                  # existing tag, and a proxy or a poisoned cache can answer with
+                  # something else entirely, so a plain download would let
+                  # unchecked code run with this job's permissions. This
+                  # digest is the released shellcheck-v0.11.0.linux.x86_64.tar.gz,
+                  # and a mismatch stops the job before the archive is unpacked.
+                  SHELLCHECK_SHA256: b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+              run: |
+                  set -euo pipefail
+                  archive="${RUNNER_TEMP}/shellcheck.tar.gz"
+                  curl -sSfL --retry 3 -o "${archive}" \
+                    "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz"
+                  printf '%s  %s\n' "${SHELLCHECK_SHA256}" "${archive}" | sha256sum -c -
+                  tar -xzf "${archive}" -C "${RUNNER_TEMP}" --strip-components=1 \
+                    "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+                  "${RUNNER_TEMP}/shellcheck" --version
+                  # -x follows the `source ./install.sh` and `source ./logs.sh` lines in
+                  # the test scripts, which shellcheck skips by default. Without it a
+                  # test only passes when the file it sources is in the same argument
+                  # list, so linting one on its own reports failures this job never
+                  # shows. Each of those scripts carries a source-path directive naming
+                  # where to look, so the result no longer depends on which directory
+                  # the linter was started in.
+                  "${RUNNER_TEMP}/shellcheck" -x install.sh uninstall.sh backup.sh logs.sh test/*.sh
 
     resolver-tests:
         # Hermetic unit tests: they stub curl/docker/launchctl/fail and source

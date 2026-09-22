@@ -17,6 +17,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NEOHIVE_LIB_ONLY=1
+# shellcheck source-path=SCRIPTDIR/..  # the cd above happens at run time;
+# this is where shellcheck should look when it reads the source line
 # shellcheck disable=SC1091
 source ./logs.sh
 
@@ -77,8 +79,11 @@ must_contain "Job completed for hive keep-plain-log-line" "plain log line untouc
 
 # Empty LICENSE_LITERAL must be a no-op path, not a broken sed expression.
 LICENSE_LITERAL=""
-printf 'plain\n' | redact | grep -qx 'plain' && { printf 'ok   no-literal path\n'; pass=$((pass + 1)); } \
-  || { printf 'FAIL no-literal path\n' >&2; failures=$((failures + 1)); }
+if printf 'plain\n' | redact | grep -qx 'plain'; then
+  printf 'ok   no-literal path\n'; pass=$((pass + 1))
+else
+  printf 'FAIL no-literal path\n' >&2; failures=$((failures + 1))
+fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$failures"
 [ "$failures" -eq 0 ]
