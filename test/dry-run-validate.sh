@@ -17,6 +17,10 @@
 #
 # Exit codes: 0 if both validations pass, non-zero otherwise.
 
+# NEOHIVE_LIB_ONLY is read by the sourced install.sh; the source is not
+# followed (SC1091 disabled) so it is misflagged as unused. This file-level
+# suppression must precede the first command to apply script-wide.
+# shellcheck disable=SC2034
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

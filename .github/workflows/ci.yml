@@ -11,5 +11,41 @@ jobs:
             - uses: actions/checkout@v4
             - name: ShellCheck install.sh
               run: shellcheck install.sh
-            - name: ShellCheck smoke.sh
-              run: shellcheck test/smoke.sh
+            - name: ShellCheck ops scripts
+              run: shellcheck uninstall.sh backup.sh logs.sh
+            - name: ShellCheck test scripts
+              run: shellcheck test/smoke.sh test/dry-run.sh test/dry-run-validate.sh test/resolver-arch.sh test/pull-diagnosis.sh test/launch-agent.sh test/metal-worker-probe.sh test/ops-redaction.sh test/ops-uninstall.sh test/ops-backup.sh test/ops-logs.sh test/ops-backup-roundtrip.sh
+
+    resolver-tests:
+        # Hermetic unit tests: they stub curl/docker/launchctl/fail and source
+        # install.sh in library mode, so they need no Docker daemon, no
+        # launchd, no network, and no registry credentials.
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Arch-aware tag resolution
+              run: bash test/resolver-arch.sh
+            - name: Empty-resolution diagnosis (E502 vs E503)
+              run: bash test/pull-diagnosis.sh
+            - name: Launch-agent load, retry and give-up
+              run: bash test/launch-agent.sh
+            - name: Metal-worker health probe
+              run: bash test/metal-worker-probe.sh
+
+    ops-tests:
+        # uninstall.sh / backup.sh / logs.sh against PATH shims for docker,
+        # launchctl, uname, nc and curl, under a throwaway HOME. Hermetic:
+        # no Docker daemon, no launchd, no network. The real backup/restore
+        # round trip (test/ops-backup-roundtrip.sh) needs a live install and
+        # is run by hand against a throwaway one.
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Diagnostics redaction filter
+              run: bash test/ops-redaction.sh
+            - name: Uninstall detection, gates and teardown order
+              run: bash test/ops-uninstall.sh
+            - name: Backup archive and restore safety checks
+              run: bash test/ops-backup.sh
+            - name: Diagnostics bundle contents
+              run: bash test/ops-logs.sh
