@@ -19,11 +19,17 @@
 # Docker Hub, and `docker manifest inspect` talks to the registry
 # without authentication for public repositories.
 
+# NEOHIVE_LIB_ONLY / UNAME_M are read by the sourced install.sh; the source
+# is not followed (SC1091 disabled) so they are misflagged as unused. This
+# file-level suppression must precede the first command to apply script-wide.
+# shellcheck disable=SC2034
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 NEOHIVE_LIB_ONLY=1
+# shellcheck source-path=SCRIPTDIR/..  # the cd above happens at run time;
+# this is where shellcheck should look when it reads the source line
 # shellcheck disable=SC1091
 source ./install.sh
 
@@ -40,8 +46,12 @@ try_pull_tag() {
   return 1
 }
 
-# Scenario inputs.
+# Scenario inputs. ARCH feeds UNAME_M so the resolver's arch_tag_suffix
+# picks the right per-arch versioned tags in stage 2 (e.g. -cpu-arm64 on
+# arm64). Stage-1 floating tags are multi-arch, so on a reachable
+# registry the probe usually settles there regardless of ARCH.
 ARCH="${ARCH:-$(uname -m)}"
+UNAME_M="$ARCH"
 BACKEND="${BACKEND:-cpu}"
 FORCED="${FORCED:-0}"
 
@@ -53,9 +63,10 @@ esac
 printf '\n%s=== Dry-run: BACKEND=%s ARCH=%s FORCED=%s ===%s\n\n' \
   "$C_BOLD" "$BACKEND" "$ARCH" "$FORCED" "$C_RESET"
 
-# Mirror step 6's dispatch. Multi-arch manifest lists mean we do not
-# suffix tags per architecture - docker pull selects the right layer
-# from the manifest automatically.
+# Mirror step 6's dispatch. Stage-1 floating tags are multi-arch, so no
+# suffix there; stage-2 versioned fallback appends the host arch suffix
+# internally (arch_tag_suffix) since versioned tags are published
+# per-arch.
 RESOLVED_TAG=""
 if [ "$FORCED" -eq 1 ]; then
   if try_pull_tag "$BACKEND"; then

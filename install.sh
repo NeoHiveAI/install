@@ -48,6 +48,14 @@
 
 set -euo pipefail
 
+# This script's own path on disk, captured out here because the top level is
+# the only place it is reliable: inside a function bash sets BASH_SOURCE[0]
+# to the literal string "main", which would then be read as a filename.
+# Empty means bash read this from a pipe (curl ... | bash) and there is no
+# file at all. Under bash <(...) it is set but names a pipe rather than a
+# regular file, so anything that opens it tests with -f, not -n.
+SELF_PATH="${BASH_SOURCE[0]:-}"
+
 IMAGE="docker.io/neohivedev/neohive"
 # Repository path used by the Docker Hub Hub API for tag enumeration. Kept
 # in lockstep with $IMAGE so a future rename only needs one edit here.
@@ -70,16 +78,25 @@ KEYGEN_PRODUCT_ID="386b2255-8b79-4358-9e12-aaf3b3c17aa2"
 # (list_versioned_tags) and at pull time (try_pull_tag). Defining it
 # once and reusing it makes pre-release rejection an invariant of the
 # resolver: a future code path that hand-rolls version tags cannot
-# bypass the filter by skipping list_versioned_tags. This is what
-# lets the upstream release pipeline publish arm64 RC builds
-# (v<X>-cpu-arm64) without leaking them to Apple Silicon customers.
+# bypass the filter by skipping list_versioned_tags. This is what lets
+# the upstream release pipeline publish RC builds (e.g. an arm64
+# v<X>-rc1-cpu-arm64) without leaking them to customers, while STABLE
+# per-arch builds (v<X>-cpu-arm64) still reach Apple Silicon hosts via
+# the arch-aware stage-2 fallback.
 PRERELEASE_TAG_PATTERN='-(rc|beta|alpha|pre|dev)'
 
 # CHANGELOG.md in this repo, surfaced post-install on upgrades.
 CHANGELOG_RAW_URL="https://raw.githubusercontent.com/NeoHiveAI/install/main/CHANGELOG.md"
 CHANGELOG_VIEW_URL="https://github.com/NeoHiveAI/install/blob/main/CHANGELOG.md"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Where a licence file may sit beside the script. With no real file there is
+# no such directory, so fall back to $PWD and let the working-directory lookup
+# at the licence search below be the only one.
+if [ -f "$SELF_PATH" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$SELF_PATH")" && pwd)"
+else
+  SCRIPT_DIR="$PWD"
+fi
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/neohive"
 LICENSE_CACHE_FILE="$CACHE_DIR/license-key"
 PORT="${NEOHIVE_PORT:-$DEFAULT_PORT}"
@@ -207,14 +224,14 @@ print_post_install() {
   fi
   printf '\n'
   printf '   In the dashboard you will:\n'
-  printf '     1. Create your first project (a "hive").\n'
+  printf '     1. Create your first Hive.\n'
   printf '     2. Copy the generated MCP command into your editor config.\n'
   printf '     3. Start storing and recalling memories from any MCP client.\n\n'
 
   printf '   %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
   printf '   %sReference%s\n\n' "$C_BOLD" "$C_RESET"
-  printf '     MCP endpoint:   %shttp://localhost:%s/hiveminds/<id>/mcp%s\n' "$C_CYAN" "$PORT" "$C_RESET"
-  printf '                     (the <id> is shown on the project detail page)\n\n'
+  printf '     MCP endpoint:   %shttp://localhost:%s/hives/<hive-id>/mcp%s\n' "$C_CYAN" "$PORT" "$C_RESET"
+  printf '                     (the <hive-id> is shown on the hive detail page)\n\n'
   printf '     HTTPS/remote:   wrap the endpoint with the %smcp-remote%s npm\n' "$C_BOLD" "$C_RESET"
   printf '                     package on the client (copy-paste command is\n'
   printf '                     shown in the dashboard).\n\n'
@@ -265,7 +282,7 @@ fetch_latest_release_notes() {
 }
 
 # Post-install summary variant for upgrades. Replaces the "Next step:
-# create your first project" block (wrong for an upgrade) with release
+# create your first hive" block (wrong for an upgrade) with release
 # notes for the version that was just pulled, plus a link to the full
 # changelog. Falls back to the generic summary if release notes are
 # unavailable.
@@ -380,20 +397,37 @@ list_versioned_tags() {
     | sort -rV
 }
 
+# Docker Hub tag suffix for the host architecture. NeoHive's FLOATING
+# tags (:cpu, :latest) are multi-arch manifest lists, so `docker pull`
+# picks the right layer and stage-1 resolution needs no suffix. But
+# VERSIONED tags are published per-arch: amd64 as v<X>-cpu and arm64 as
+# v<X>-cpu-arm64 - there is no multi-arch versioned manifest. So the
+# stage-2 versioned fallback must append this suffix on arm64, or it
+# enumerates amd64-only v<X>-cpu tags on an Apple Silicon / aarch64 host,
+# every pull misses, and the installer wrongly reports "no compatible
+# image" on a platform that actually has images. Empty on amd64.
+arch_tag_suffix() {
+  case "${UNAME_M:-$(uname -m)}" in
+    arm64|aarch64) printf -- '-arm64' ;;
+    *)             printf '' ;;
+  esac
+}
+
 # Walks the fallback chain for $BACKEND. Stage 1 tries floating
-# per-backend tags (multi-arch manifest lists); stage 2 enumerates
-# versioned stable tags for the same backends if no floating tag
-# resolves. On success sets RESOLVED_TAG and (on a backend downgrade)
-# mutates BACKEND so the device-flag switch in step 7 stays consistent
-# with what was actually pulled. On total miss leaves RESOLVED_TAG
-# empty and returns 1.
+# per-backend tags (multi-arch manifest lists, so no arch suffix);
+# stage 2 enumerates versioned stable tags for the same backends if no
+# floating tag resolves, appending the host arch suffix (see
+# arch_tag_suffix) because versioned tags are published per-arch. On
+# success sets RESOLVED_TAG and (on a backend downgrade) mutates BACKEND
+# so the device-flag switch in step 7 stays consistent with what was
+# actually pulled. On total miss leaves RESOLVED_TAG empty and returns 1.
 #
-# The suffix parameter is retained for forward compatibility but is
-# currently always empty - multi-arch manifests make per-arch suffixes
-# unnecessary.
+# The suffix parameter is retained for forward compatibility (extra
+# per-backend suffixes) and is currently always empty at the call sites.
 resolve_with_suffix() {
   local suffix="$1"
-  local candidate vtag tag
+  local candidate vtag tag arch_sfx
+  arch_sfx="$(arch_tag_suffix)"
   for candidate in $(backend_chain "$BACKEND"); do
     tag="${candidate}${suffix}"
     if try_pull_tag "$tag"; then
@@ -408,10 +442,11 @@ resolve_with_suffix() {
   # Stage 2: no floating tag resolved. Enumerate versioned tags
   # (newest stable first, pre-releases filtered) and pull the first
   # that exists. This covers partial-release windows or registry
-  # flakiness at list time.
+  # flakiness at list time. The arch suffix is applied here (but not to
+  # the floating tags above) because only versioned tags are per-arch.
   info "no floating tag${suffix:+ (suffix $suffix)} - checking versioned tags"
   for candidate in $(backend_chain "$BACKEND"); do
-    for vtag in $(list_versioned_tags "${candidate}${suffix}"); do
+    for vtag in $(list_versioned_tags "${candidate}${suffix}${arch_sfx}"); do
       if try_pull_tag "$vtag"; then
         if [ "$candidate" != "$BACKEND" ]; then
           warn "'$BACKEND' image unavailable - falling back to '$candidate' at $vtag"
@@ -423,6 +458,36 @@ resolve_with_suffix() {
     done
   done
   return 1
+}
+
+# Called when tag resolution came up empty (stage 1 and stage 2 both
+# missed). Distinguishes a genuinely missing image / unreachable registry
+# (E502) from a compatible image whose pull did not complete - almost
+# always an interrupted (Ctrl-C) or dropped download (E503).
+#
+# docker manifest inspect is a metadata-only probe (no layers move), but it
+# returns the ENTIRE manifest list and succeeds as long as that list
+# exists - it does NOT filter to, or require, a layer for the host arch. So
+# we must grep the list for a layer matching THIS host's arch, not just
+# check the command's exit status. Only amd64 and arm64 images are
+# published; on any other host arch (ppc64le, s390x, riscv, ...) no
+# compatible image can exist, so we skip the probe and report E502 directly.
+# Mapping an unsupported arch onto amd64 would spuriously match the amd64
+# layer and mis-report E503 for a download that can never succeed. Both
+# branches exit via fail().
+diagnose_empty_resolution() {
+  local goarch=""
+  case "${UNAME_M:-$(uname -m)}" in
+    x86_64|amd64)  goarch=amd64 ;;
+    arm64|aarch64) goarch=arm64 ;;
+  esac
+  if [ -n "$goarch" ] && {
+    docker manifest inspect "$IMAGE:cpu"    2>/dev/null | grep -qE "\"architecture\"[[:space:]]*:[[:space:]]*\"$goarch\"" \
+      || docker manifest inspect "$IMAGE:latest" 2>/dev/null | grep -qE "\"architecture\"[[:space:]]*:[[:space:]]*\"$goarch\""
+  }; then
+    fail E503 "a compatible image exists on $IMAGE but the download did not complete - usually an interrupted (Ctrl-C) or dropped pull. Re-run the installer to resume; already-pulled layers are cached."
+  fi
+  fail E502 "no compatible image found on $IMAGE. Check connectivity to Docker Hub and retry."
 }
 
 # -- License file reader ----------------------------------------------
@@ -538,6 +603,10 @@ resolve_license() {
     read -r src_path
     # Expand a leading ~ and ~user against the shell's tilde rules so a
     # pasted "~/Downloads/neohive.license" Just Works in interactive mode.
+    # Tilde is expanded manually via ${HOME}${src_path#\~}, so SC2088 ("tilde
+    # does not expand in quotes") is a false positive. The directive must sit
+    # in front of the whole case, not the branch (SC1124).
+    # shellcheck disable=SC2088
     case "$src_path" in
       "~"|"~/"*) src_path="${HOME}${src_path#\~}" ;;
     esac
@@ -758,14 +827,123 @@ license_resolve_and_validate() {
   return 1
 }
 
+# Load a launchd agent, tolerating launchd's teardown race.
+#
+# `launchctl bootout` returns before launchd has finished unloading, so a
+# `bootstrap` that lands too early fails with "Bootstrap failed: 5: Input/output
+# error" even though the plist is fine. A single attempt turns that timing blip
+# into a permanent downgrade, so retry a few times. The last launchctl error is
+# printed on stdout when every attempt fails, so a caller can report WHY it
+# could not load (a malformed plist, a program that is not executable) rather
+# than only that it did not.
+#
+# Usage: bootstrap_launch_agent <label> <plist>
+bootstrap_launch_agent() {
+  local label="$1" plist="$2" attempt=0 err=""
+  while :; do
+    if err="$(launchctl bootstrap "gui/$(id -u)" "$plist" 2>&1)"; then
+      # Start it now rather than waiting on RunAtLoad, and make a re-install
+      # pick up the rendered plist even if the agent was somehow still loaded.
+      launchctl kickstart "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 5 ]; then
+      printf '%s' "$err"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# Seconds phase 2 of metal_worker_health_ok may spend. Validated like
+# NEOHIVE_METAL_WORKER_PORT: arithmetic reads a non-numeric value as 0, so a
+# typo would silently cut the budget to one attempt. 0 itself is allowed and
+# means exactly that, which is what the suite uses.
+metal_worker_health_budget() {
+  local budget="${NEOHIVE_METAL_WORKER_HEALTH_BUDGET_S:-90}"
+  if ! printf '%s' "$budget" | grep -qE '^[0-9]+$'; then
+    warn "NEOHIVE_METAL_WORKER_HEALTH_BUDGET_S must be a non-negative integer (got '$budget') - using 90."
+    budget=90
+  fi
+  printf '%s' "$budget"
+}
+
+# Decide whether the Metal worker is usable. Phase 1 waits for a listener,
+# which fails fast when the agent never came up. Phase 2 decides: the worker
+# must answer a real gRPC embed via the healthcheck its bundle ships.
+#
+# A TCP accept is not proof of a worker. This was `nc -z` alone, so an
+# unrelated listener on the port read as healthy: the install reported "Metal
+# worker active", the gateway was pointed at a port no worker had bound, and
+# every embed failed `14 UNAVAILABLE` with no fallback to CPU.
+#
+# Phase 2's budget covers a worker still loading a model, not the ~950MB
+# first-run download: the healthcheck reports healthy as soon as that download
+# is moving, so the install completes with the model still arriving. Deliberate.
+#
+# It is wall-clock, not an attempt count, because a listener that speaks HTTP/2
+# and then stalls costs a per-embed deadline every attempt. (A listener that is
+# not a worker at all fails in ~0.1s, gRPC never completing its handshake.)
+#
+# Prints why it declined on stdout and returns 1. Silent on success.
+#
+# Usage: metal_worker_health_ok <port>
+metal_worker_health_ok() {
+  local port="$1" hc_node hc_js hc_out=""
+  hc_node="$METAL_WORKER_ROOT/current/bin/node"
+  hc_js="$METAL_WORKER_ROOT/current/lib/healthcheck.cjs"
+
+  # Attempt-bounded, unlike phase 2: loopback connects or refuses at once, so
+  # 15 attempts is a real 15-second ceiling.
+  local listening=0
+  for _ in $(seq 1 15); do
+    if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then listening=1; break; fi
+    sleep 1
+  done
+  if [ "$listening" != "1" ]; then
+    printf 'nothing is listening on 127.0.0.1:%s' "$port"
+    return 1
+  fi
+
+  if [ ! -x "$hc_node" ] || [ ! -f "$hc_js" ]; then
+    # Worker bundles have shipped a healthcheck since the watchdog landed.
+    # Without one there is no way to tell a worker from any other listener,
+    # and guessing permissively is the bug described above.
+    printf 'the worker bundle has no healthcheck at %s' "$hc_js"
+    return 1
+  fi
+
+  # `while :` always runs one attempt, so a zero budget still reaches every branch.
+  local healthy=0 deadline
+  deadline=$(( $(date +%s) + $(metal_worker_health_budget) ))
+  while :; do
+    if hc_out="$(MEMVEC_QUERY_WORKER_HOST=127.0.0.1 MEMVEC_QUERY_WORKER_PORT="$port" \
+        "$hc_node" "$hc_js" 2>&1)"; then
+      healthy=1
+      break
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || break
+    sleep 2
+  done
+  if [ "$healthy" != "1" ]; then
+    printf 'something is listening on 127.0.0.1:%s but it did not answer a health embed: %s' \
+      "$port" "${hc_out:-no output}"
+    return 1
+  fi
+  return 0
+}
+
 # ----------------------------------------------------------------------
 # Main flow
 # ----------------------------------------------------------------------
 # Library mode: when sourced with NEOHIVE_LIB_ONLY=1 (by the dry-run
 # harness, for instance), stop here so only the helpers above are
-# loaded. Guarded on BASH_SOURCE vs $0 so that directly executing the
-# script never triggers the early return.
-if [ "${BASH_SOURCE[0]}" != "${0}" ] && [ "${NEOHIVE_LIB_ONLY:-0}" = "1" ]; then
+# loaded. Guarded on SELF_PATH vs $0 so that directly executing the
+# script never triggers the early return. A piped script has no SELF_PATH
+# and cannot be sourced, so -n keeps it out of a return that would be
+# invalid at top level.
+if [ -n "$SELF_PATH" ] && [ "$SELF_PATH" != "${0}" ] && [ "${NEOHIVE_LIB_ONLY:-0}" = "1" ]; then
   return 0
 fi
 
@@ -788,11 +966,13 @@ done
 apply_license_file "$CLI_LICENSE_FILE"
 
 # [1] Platform
-# NeoHive images are published as multi-arch manifest lists - `:cpu`,
-# `:latest`, and `:v<version>` carry both linux/amd64 and linux/arm64
-# layers, and `docker pull` selects the matching layer automatically.
-# The installer does not append an arch suffix to tags; the manifest
-# list handles arch selection.
+# NeoHive's FLOATING tags (:cpu, :latest) are multi-arch manifest lists -
+# they carry both linux/amd64 and linux/arm64 layers, so `docker pull`
+# selects the matching layer automatically and stage-1 resolution needs
+# no arch suffix. VERSIONED tags, however, are published PER-ARCH: amd64
+# as v<X>-cpu and arm64 as v<X>-cpu-arm64 (no multi-arch versioned
+# manifest). The stage-2 versioned fallback therefore appends an arch
+# suffix on arm64 - see arch_tag_suffix / resolve_with_suffix.
 step 1 "Detecting platform..."
 UNAME_S="$(uname -s)"
 UNAME_M="$(uname -m)"
@@ -923,7 +1103,7 @@ else
   resolve_with_suffix "" || true
 fi
 if [ -z "$RESOLVED_TAG" ]; then
-  fail E502 "no compatible image found on $IMAGE. Check connectivity to Docker Hub and retry."
+  diagnose_empty_resolution
 fi
 ok "image ready ($RESOLVED_TAG)"
 
@@ -932,7 +1112,7 @@ ok "image ready ($RESOLVED_TAG)"
 # container. Presence of the data volume is the durable signal - the
 # container may have been `docker rm`'d but a returning user's data
 # survives in the volume, and we still want to greet them with release
-# notes rather than the "create your first project" walkthrough.
+# notes rather than the "create your first hive" walkthrough.
 IS_UPDATE=0
 if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
   IS_UPDATE=1
@@ -988,6 +1168,180 @@ forward_timeout_env() {
 forward_timeout_env NEOHIVE_PDF_BRIDGE_TIMEOUT_MS MEMVEC_PDF_BRIDGE_TIMEOUT_MS
 forward_timeout_env NEOHIVE_PDF_WARMUP_TIMEOUT_MS MEMVEC_PDF_WARMUP_TIMEOUT_MS
 forward_timeout_env NEOHIVE_CHUNKER_TIMEOUT_MS    MEMVEC_CHUNKER_TIMEOUT_MS
+
+# ── macOS Metal embedding worker (Apple Silicon only) ────────────────
+# Linux VMs on macOS cannot reach the GPU, so in-container embedding is
+# CPU-only there. On darwin-arm64 hosts the installer provisions a
+# self-contained native worker (Metal-accelerated, ~30-70x embedding
+# throughput) under ~/.neohive and wires the container to it over gRPC.
+#
+# Safety invariants:
+#   - Platform gate: anything that is not Darwin/arm64 returns on the
+#     first line - non-macOS installs never execute this path.
+#   - Every failure (pull, extract, launchd, health, container probe)
+#     warns and returns WITHOUT touching RUN_ARGS, so the container
+#     falls back to exactly the pre-existing in-container behaviour.
+#   - The env vars are appended only after a probe container has
+#     actually reached the worker through Docker's host-gateway.
+#   - Opt out with NEOHIVE_METAL_WORKER=0; the port is customer-tunable
+#     via NEOHIVE_METAL_WORKER_PORT (default 50051).
+# NEOHIVE_METAL_WORKER_IMAGE and NEOHIVE_METAL_WORKER_TAG name the worker
+# repository and version to install. Set both to install a specific worker
+# rather than the one this installer picks.
+METAL_WORKER_IMAGE="${NEOHIVE_METAL_WORKER_IMAGE:-docker.io/neohivedev/neohive-metal-worker}"
+METAL_WORKER_ROOT="${HOME}/.neohive/metal-worker"
+METAL_WORKER_LABEL="com.neohive.metal-worker"
+METAL_WORKER_PORT="${NEOHIVE_METAL_WORKER_PORT:-50051}"
+METAL_WORKER_ENABLED=0
+
+setup_metal_worker() {
+  { [ "$UNAME_S" = "Darwin" ] && [ "$UNAME_M" = "arm64" ]; } || return 0
+  if [ "${NEOHIVE_METAL_WORKER:-1}" = "0" ]; then
+    info "Metal worker disabled (NEOHIVE_METAL_WORKER=0)"
+    return 0
+  fi
+  if ! printf '%s' "$METAL_WORKER_PORT" | grep -qE '^[1-9][0-9]*$'; then
+    warn "NEOHIVE_METAL_WORKER_PORT must be a positive integer (got '$METAL_WORKER_PORT') - keeping in-container CPU embedding."
+    return 0
+  fi
+
+  # Worker version: a versioned image tag (v1.6.3-cpu) takes the matching
+  # worker version. A floating tag (:cpu), or a version with no matching
+  # worker, takes the newest published worker instead.
+  #
+  # NEOHIVE_METAL_WORKER_TAG replaces that choice and installs exactly the
+  # version given. Set it when the worker version has to be an exact one.
+  local wtag pinned=0
+  if [ -n "${NEOHIVE_METAL_WORKER_TAG:-}" ]; then
+    wtag="$NEOHIVE_METAL_WORKER_TAG"
+    pinned=1
+  else
+    case "$RESOLVED_TAG" in
+      v*) wtag="${RESOLVED_TAG%%-*}" ;;
+      *)  wtag="" ;;
+    esac
+  fi
+  info "Apple Silicon detected - provisioning native Metal embedding worker..."
+  if [ -z "$wtag" ] || ! docker pull "$METAL_WORKER_IMAGE:$wtag" >/dev/null 2>&1; then
+    if [ "$pinned" = "1" ]; then
+      warn "Could not pull the pinned Metal worker $METAL_WORKER_IMAGE:$wtag - keeping in-container CPU embedding."
+      return 0
+    fi
+    # Worker versions can only be looked up on Docker Hub, so a repository on
+    # any other registry needs NEOHIVE_METAL_WORKER_TAG. A repository name
+    # whose first part carries a dot or a colon names another registry, so
+    # neohivedev/neohive-metal-worker and its docker.io/ form are Docker Hub
+    # and registry.example.com/team/worker is not.
+    local hub_repo="${METAL_WORKER_IMAGE#docker.io/}"
+    case "${hub_repo%%/*}" in
+      *.* | *:*)
+        warn "No worker version was given for $METAL_WORKER_IMAGE, and versions can only be searched for on Docker Hub - keeping in-container CPU embedding. Set NEOHIVE_METAL_WORKER_TAG."
+        return 0
+        ;;
+    esac
+    # Same enumeration approach as list_versioned_tags, against the worker
+    # repo (plain v<X.Y.Z> tags, no backend suffix), with the same
+    # pre-release rejection invariant.
+    wtag="$(curl -fsSL --max-time 10 \
+        "https://hub.docker.com/v2/repositories/$hub_repo/tags/?page_size=100" 2>/dev/null \
+      | tr ',' '\n' \
+      | sed -n 's/.*"name":"\(v[0-9][^"]*\)".*/\1/p' \
+      | grep -vE -- "$PRERELEASE_TAG_PATTERN" \
+      | sort -rV | head -1 || true)"
+    if [ -z "$wtag" ] || ! docker pull "$METAL_WORKER_IMAGE:$wtag" >/dev/null 2>&1; then
+      warn "No pullable Metal worker image found - keeping in-container CPU embedding."
+      return 0
+    fi
+  fi
+
+  # The worker image is a scratch layer of darwin binaries - it never
+  # runs as a container; we docker create/cp purely to extract files.
+  local cid staged dest wver
+  cid="$(docker create "$METAL_WORKER_IMAGE:$wtag" /noop 2>/dev/null || true)"
+  if [ -z "$cid" ]; then
+    warn "Could not stage the Metal worker bundle - keeping in-container CPU embedding."
+    return 0
+  fi
+  staged="$METAL_WORKER_ROOT/.staging"
+  rm -rf "$staged" && mkdir -p "$staged"
+  if ! docker cp "$cid:/bundle/." "$staged/" >/dev/null 2>&1; then
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+    warn "Could not extract the Metal worker bundle - keeping in-container CPU embedding."
+    return 0
+  fi
+  docker rm -f "$cid" >/dev/null 2>&1 || true
+  wver="$(cat "$staged/VERSION" 2>/dev/null || echo unknown)"
+
+  # Swap the live install and (re)start the launch agent. bootout of a
+  # not-loaded agent is a harmless no-op; KeepAlive restarts on reboot.
+  dest="$METAL_WORKER_ROOT/current"
+  launchctl bootout "gui/$(id -u)/$METAL_WORKER_LABEL" 2>/dev/null || true
+  rm -rf "$dest"
+  mv "$staged" "$dest"
+
+  # The worker will not start unless these two are executable, and it fails
+  # without writing a log when they are not. Set every time rather than
+  # assumed, because the file mode can be lost on the way to this Mac.
+  chmod +x "$dest/bin/node" "$dest/bin/neohive-embedder" 2>/dev/null || true
+
+  mkdir -p "$HOME/.neohive/models" "$HOME/.neohive/logs" "$HOME/Library/LaunchAgents"
+  sed -e "s|__ROOT__|$dest|g" \
+      -e "s|__PORT__|$METAL_WORKER_PORT|g" \
+      -e "s|__MODELS__|$HOME/.neohive/models|g" \
+      -e "s|__LOGS__|$HOME/.neohive/logs|g" \
+      "$dest/launchd/com.neohive.metal-worker.plist.template" \
+      > "$HOME/Library/LaunchAgents/$METAL_WORKER_LABEL.plist"
+  local bootstrap_err
+  if ! bootstrap_err="$(bootstrap_launch_agent "$METAL_WORKER_LABEL" \
+      "$HOME/Library/LaunchAgents/$METAL_WORKER_LABEL.plist")"; then
+    warn "Could not start the Metal worker launch agent - keeping in-container CPU embedding.${bootstrap_err:+ launchctl said: $bootstrap_err}"
+    return 0
+  fi
+
+  # Host-side health. Must answer a real embed, not merely accept a connection.
+  local health_err
+  if ! health_err="$(metal_worker_health_ok "$METAL_WORKER_PORT")"; then
+    warn "Metal worker is not usable - keeping in-container CPU embedding.${health_err:+ $health_err} (see ~/.neohive/logs)"
+    return 0
+  fi
+
+  # Install the auto-heal watchdog next to the worker (HIVE-354 / HIVE-382). The
+  # bundle ships lib/install-watchdog.sh + healthcheck.cjs + watchdog.sh + bin/node
+  # + the plist template, so this needs no repo access. Best-effort: a watchdog
+  # failure must not fail the install or disable native embedding - the worker
+  # still runs, just without the ~3-min self-heal from a soft-hang.
+  # Keep the output: it is the only diagnostic for a watchdog that did not
+  # install, and the warning below is the only place the user sees it.
+  local wd_log="$HOME/.neohive/logs/watchdog-install.log"
+  if sh "$dest/lib/install-watchdog.sh" "$dest" "$METAL_WORKER_LABEL" "$METAL_WORKER_PORT" "$HOME/.neohive/logs" >"$wd_log" 2>&1; then
+    info "Auto-heal watchdog installed - the Metal worker self-recovers from a soft-hang."
+  else
+    warn "Auto-heal watchdog install failed (see $wd_log) - the Metal worker runs but will not auto-recover from a soft-hang."
+  fi
+
+  # Container-side probe: prove a container can reach the worker through
+  # host-gateway BEFORE wiring the real container to it. Uses the main
+  # image (already pulled in step 6) so no extra download.
+  if ! docker run --rm --add-host host.docker.internal:host-gateway \
+        --entrypoint node "$IMAGE:$RESOLVED_TAG" \
+        -e "const s=require('net').connect({host:'host.docker.internal',port:$METAL_WORKER_PORT},()=>process.exit(0));s.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),5000)" \
+        >/dev/null 2>&1; then
+    warn "Containers cannot reach the Metal worker through host-gateway - keeping in-container CPU embedding."
+    return 0
+  fi
+
+  # Ingest shares this query worker automatically (derived in the gateway from
+  # the query transport) — no separate MEMVEC_INGEST_WORKER_* vars needed.
+  RUN_ARGS+=(
+    --add-host host.docker.internal:host-gateway
+    -e "MEMVEC_QUERY_WORKER_HOST=host.docker.internal"
+    -e "MEMVEC_QUERY_WORKER_PORT=$METAL_WORKER_PORT"
+  )
+  METAL_WORKER_ENABLED=1
+  info "Metal worker $wver active - embedding runs natively on Apple Silicon (disable with NEOHIVE_METAL_WORKER=0)"
+}
+setup_metal_worker
+
 case "$BACKEND" in
   vulkan) RUN_ARGS+=(--device /dev/dri) ;;
   cuda)   RUN_ARGS+=(--gpus all) ;;
@@ -1064,6 +1418,18 @@ print_grace_banner() {
   printf '   %s%s%s\n\n' "$C_RED" "$bar" "$C_RESET"
 }
 print_license_summary
+
+# Which embedding path the install landed on. METAL_WORKER_ENABLED is set only
+# after the worker answered and a probe container reached it, so this is the
+# outcome, not the intention. Printed here because the provisioning lines are
+# far up the screen by now. Apple Silicon only: nowhere else has a worker.
+if [ "$UNAME_S" = "Darwin" ] && [ "$UNAME_M" = "arm64" ]; then
+  if [ "$METAL_WORKER_ENABLED" -eq 1 ]; then
+    printf '      Embedding: native Metal worker on 127.0.0.1:%s\n' "$METAL_WORKER_PORT"
+  else
+    printf '      Embedding: in-container CPU (no Metal worker)\n'
+  fi
+fi
 
 if [ "$IS_UPDATE" -eq 1 ]; then
   print_post_install_update
