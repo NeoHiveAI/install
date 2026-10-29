@@ -205,7 +205,7 @@ it cannot reach.
 
 Your data survives by default: the `neohive-data` volume and the
 licence-seat fingerprint in `~/.cache/neohive/machine-id` are kept, so a
-later reinstall finds your hives and reuses the same seat. To delete
+later reinstall finds your Hives and reuses the same seat. To delete
 everything:
 
 ```sh
