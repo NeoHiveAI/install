@@ -66,7 +66,10 @@ COUNT="$SANDBOX/bootstrap.count"
 
 # BOOTSTRAP_FAILURES: 0 = always succeed; <n> = fail the first n bootstrap
 # calls (models launchd's teardown race); "always" = never load.
+# BOOTSTRAP_ERROR is what a failing call prints: the teardown race by
+# default, or any other launchctl complaint a case wants to model.
 BOOTSTRAP_FAILURES=0
+BOOTSTRAP_ERROR='Bootstrap failed: 5: Input/output error'
 
 # The counter lives in a file, not a variable: bootstrap_launch_agent captures
 # launchctl's output with $(...), so the stub runs in a subshell and any
@@ -79,20 +82,23 @@ launchctl() {
     n=$((n + 1))
     printf '%s' "$n" >"$COUNT"
     if [ "$BOOTSTRAP_FAILURES" = "always" ] || [ "$n" -le "$BOOTSTRAP_FAILURES" ]; then
-      printf 'Bootstrap failed: 5: Input/output error\n' >&2
+      printf '%s\n' "$BOOTSTRAP_ERROR" >&2
       return 5
     fi
   fi
   return 0
 }
 
-# The retry backoff, made instant.
-sleep() { :; }
+# The retry backoff, made instant but recorded, so a case can assert the
+# budget without actually waiting it out.
+sleep() { printf '%s\n' "$1" >>"$SANDBOX/sleeps"; }
 id() { printf '501'; }
 
 reset_sandbox() {
   : >"$CALLS"
+  : >"$SANDBOX/sleeps"
   printf '0' >"$COUNT"
+  BOOTSTRAP_ERROR='Bootstrap failed: 5: Input/output error'
 }
 calls() { grep -Ec -- "$1" "$CALLS" || true; }
 
@@ -132,10 +138,36 @@ BOOTSTRAP_FAILURES=always
 rc=0
 out="$(bootstrap_launch_agent "$LABEL" "$PLIST")" || rc=$?
 assert_eq "a permanent failure reports failure" "1" "$rc"
-assert_eq "it stops after a bounded number of attempts" "5" "$(calls '^bootstrap')"
+assert_eq "it stops after a bounded number of attempts" "7" "$(calls '^bootstrap')"
 assert_eq "a failed load is never kickstarted" "0" "$(calls '^kickstart')"
 assert_contains "the launchctl error is handed back to the caller" \
   "Bootstrap failed: 5" "$out"
+
+printf '\n=== a teardown slower than the old five-second budget still loads ===\n\n'
+# The race this exists for: launchd took longer than five flat seconds to
+# finish unloading the old agent, and giving up there is a permanent
+# downgrade to in-container CPU embedding on a healthy machine.
+reset_sandbox
+BOOTSTRAP_FAILURES=6
+rc=0
+out="$(bootstrap_launch_agent "$LABEL" "$PLIST")" || rc=$?
+assert_eq "a slow teardown is retried through to success" "0" "$rc"
+assert_eq "the backoff roughly doubles instead of hammering" \
+  "1 2 4 8 16 32" "$(paste -sd' ' - <"$SANDBOX/sleeps")"
+assert_eq "the agent ends up started" "1" "$(calls '^kickstart')"
+
+printf '\n=== any other launchctl error fails on the first attempt ===\n\n'
+# A malformed plist fails the same way every time; a minute of retries
+# against it only delays the warning the customer needs to read.
+reset_sandbox
+BOOTSTRAP_FAILURES=always
+BOOTSTRAP_ERROR='Bootstrap failed: 37: Operation not permitted'
+rc=0
+out="$(bootstrap_launch_agent "$LABEL" "$PLIST")" || rc=$?
+assert_eq "a non-race error reports failure" "1" "$rc"
+assert_eq "it is not retried" "1" "$(calls '^bootstrap')"
+assert_contains "its own error is handed back, not the race's" \
+  "Operation not permitted" "$out"
 
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then

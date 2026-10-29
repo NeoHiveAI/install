@@ -1,3 +1,145 @@
+## v1.8.0 (2026-10-29)
+
+## What's Changed
+* fix(gateway): :bug: repair vestigial hiveminds.port column on upgraded DBs by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/95
+* fix(sync): repair downstream PR creation, restore src parity, and adopt always-PR delivery by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/94
+* fix(frontend): :bug: 1.6 FE bug-fixing pass (hive move UI + sync queue labels) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/97
+* [HIVE-205] Integrate import logic and scheduling for activity data by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/86
+* [HIVE-237] F1 - Session-state file + recall-signal stamping by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/90
+* fix(scheduler): :bug: remove orphaned git-sync schedules on hive delete (HIVE-291) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/99
+* fix(chunker): :bug: guard oversized code files from CodeSplitter timeout (HIVE-302) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/106
+* Sync downstream plugins to v1.6.3 and adopt Codex marketplace layout by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/105
+* sync reliability: branch auto-detect/recovery + scheduler overlap guard (HIVE-318, HIVE-319) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/110
+* fix(installer): :bug: resolve arm64 versioned image tags, clarify pull failures by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/104
+* refactor: 💅🏽 Improve project and hive UI/UX for connecting data sources by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/108
+* fix(commit-import): stop passing --since=@0 to git log (flaky Full Tests) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/109
+* feat(embeddings): per-model pooling + Qwen3-Embedding-4B (HIVE-234) by @MannyKv in https://github.com/NeoHiveAI/MemVec/pull/87
+* Add NeoHive backlink blurb to README by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/101
+* fix: correct licence banner visibility logic and banner dark mode colour by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/113
+* feat(embeddings): :sparkles: Zero-touch native Metal embedding on Apple Silicon (+ ship proto in image) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/102
+* fix(embeddings): :bug: bound embedder onboarding + surface remote-worker download progress (HIVE-323) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/114
+* feat(migrations): migration safety — snapshot before migrate, auto-rollback, refuse-to-start [HIVE-213] by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/83
+* HIVE-354: metal query-worker auto-deploy from main + auto-heal watchdog by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/121
+* Batch LanceDB vector writes during indexing (HIVE-321) by @MannyKv in https://github.com/NeoHiveAI/MemVec/pull/115
+* fix(ingestion): :bug: cap ingest embed batch size to avoid wedging the shared worker by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/127
+* feat(embeddings): :sparkles: add Qwen3-Embedding-0.6B (last-token); deprecate Qwen3-Embedding-4B by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/126
+* fix(metal-worker): :ambulance: actually install the auto-heal watchdog (HIVE-382) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/128
+* fix(ci): :bug: authenticate the metal-worker pnpm install to the private registry (HIVE-382) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/130
+* fix: Add-a-hive, onboarding, and project-management fixes by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/117
+* ci: report build timings in the Slack notifications by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/138
+* fix(chunker): unpinned Docling auto-upgrade broke PDFs, force eager backend by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/146
+* [HIVE-358] Organise the test suite by level (rename, tag, wire Vitest projects) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/131
+* ci: collapse a PR stack into one Slack notification by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/139
+* chore(bench): :bar_chart: LanceDB ingest + write benchmark harnesses (HIVE-357) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/123
+* [HIVE-361] Implement the Fast feedback gate (on push) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/141
+* [HIVE-362] Implement the merge gate (pre-merge) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/143
+* fix(ci): notify a stacked PR on its own message when the stack has none by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/153
+* fix(ci): scope the traceability gate to product source by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/157
+* [HIVE-369] Fill Connections and Credentials test gaps by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/160
+* [HIVE-371] Fill Sync Engine test gaps by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/161
+* [HIVE-402] CI job to manually branch from `main` as first Release Candidate by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/148
+* [HIVE-370] Fill Licensing test gaps by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/163
+* [HIVE-365] Fill Embedding Retrieval unit test gaps by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/164
+* [HIVE-419] Typecheck test sources by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/165
+* fix(stats): :bug: include vector bytes in hive on-disk total by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/125
+* fix(re-embed): :bug: bound producer concurrency to the worker, not the host CPU count (HIVE-383) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/129
+* feat(embeddings): :sparkles: progress-based embed staleness (HIVE-394 P1) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/132
+* fix(embeddings): :bug: GGUF model download resilience (retry + backoff) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/112
+* fix(embeddings): :bug: stop one failed embed from wedging the shared gRPC stream (HIVE-396) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/178
+* [HIVE-317] Rename Projects to Hives, Hives to Index by @azchu in https://github.com/NeoHiveAI/MemVec/pull/119
+* [HIVE-416] Redirect /projects/* links and enforce Hive/Index casing by @azchu in https://github.com/NeoHiveAI/MemVec/pull/166
+* [HIVE-419] Type connection secret columns as ArrayBuffer by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/173
+* [HIVE-368] Fill MCP tools test gaps by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/159
+* [HIVE-364] Fill Auth and access control test gaps by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/158
+* [HIVE-404] Make sure hotfixes follow the Release Candidate process by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/150
+* fix(ci): give a PR stack one Slack message however the stack was formed by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/175
+* ci: implement exemption logic for coverage gate by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/181
+* [HIVE-403] CI job to promote latest release candidate as the public release by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/152
+* [HIVE-407] Block publish while any gate-found fix's main-bound PR is open by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/154
+* [HIVE-317] Sweep docs for Hive/Index vocabulary by @azchu in https://github.com/NeoHiveAI/MemVec/pull/179
+* fix(embeddings): :bug: reuse the gRPC channel across self-heals (HIVE-436) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/184
+* fix(ingestion): :bug: stop binary files reaching the embedder (HIVE-397) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/183
+* refactor(gateway): :recycle: derive ingest routing from the query worker; remove MEMVEC_INGEST_WORKER_HOST/PORT (HIVE-395) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/133
+* fix(re-embed): auto-recover corrupt Lance vector store + batch re-embed writes (backport of #189) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/190
+* fix(retrieval): :bug: keep match quality through the multi-query merge by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/168
+* ci: add new "cosmetic" check step in Traceability gate by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/180
+* fix(retrieval): :bug: rank cross-hive results by real match quality by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/169
+* [HIVE-372] Fill Hive and Index test gaps by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/186
+* fix(retrieval): :bug: make per-hive diversity a floor, not a share by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/170
+* test(retrieval): :white_check_mark: cover cross-hive relevance, not just shape by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/171
+* [HIVE-367] Fill Platform and Deploy test gaps by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/187
+* [HIVE-442][HIVE-443][HIVE-444][HIVE-445][HIVE-446][HIVE-447] Close P0 coverage gaps by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/192
+* [HIVE-440] [HIVE-441] P0 coverage remaining embedding retrieval engine by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/194
+* [HIVE-366] Fill Frontend Dashboard test gaps by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/188
+* [HIVE-363] Implement QA check during candidate and promotion Release CI gates by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/191
+* ci: script to install neohive rc for manual testing by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/197
+* [HIVE-401] Implement QA check for patch Release CI gates  by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/193
+* ci: automate qa gate dispatch (automating HIVE-363 and HIVE-401) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/198
+* ci: update pr slack notifier to handle `assignee` as another `reviewer` field by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/199
+* [HIVE-449] Restrict candidate cut to only `main` branch by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/200
+* rc-fix: Handle silent failures in candidate build (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/202
+* rc-fix: Stop the rust cache from deleting rustup on the metal runner (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/204
+* rc-fix: Fix QA gate failures and post verdict to slack (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/206
+* rc-fix: Fix the GPU (vulkan) embedder failing to start in the release image (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/208
+* refactor: make prefix "v" for manual testing install script optional by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/210
+* rc-fix: Keep a broken embedder or a mismatched database from looking healthy (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/211
+* rc-fix: Fix the Metal worker not being provisioned for a release candidate (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/214
+* rc-fix: metal worker embed hang and launch agent retry (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/217
+* [HIVE-467] Implement `vulkan` backend for QA L5 Deploy Matrix (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/213
+* rc-fix: Keep repo sync working through renamed branches, duplicate triggers and failed runs (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/218
+* rc-fix: [MAN-REL-05] Detect vector corruption in the data files, not just the manifest (main) by @azchu in https://github.com/NeoHiveAI/MemVec/pull/226
+* rc-fix: [MAN-INSTALL-02] Keep embedding working when the Metal worker is unhealthy (main) by @azchu in https://github.com/NeoHiveAI/MemVec/pull/224
+* fix(ui): :bug: point the active-hive header at the hive before loading it (backport of #235 to main) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/236
+* rc-fix: Model path, toasts and legacy Index redirects (main) by @azchu in https://github.com/NeoHiveAI/MemVec/pull/240
+* fix(sync): recover files lost when the embedder dies mid-sync by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/223
+* feat(install): :sparkles: add customer uninstall, backup/restore and diagnostics scripts (main) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/228
+* rc-fix: Build the release into Docker Hub instead of copying it (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/253
+* hotfix: [HIVE-514] Show the release version the image was built as (main) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/259
+* hotfix: lint and test the installer scripts before they publish (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/257
+* hotfix: [HIVE-317] Sweep remaining pre-rename vocabulary in sync-repos and install docs (main) by @azchu in https://github.com/NeoHiveAI/MemVec/pull/252
+* hotfix: [HIVE-417] Point .mcp.json at the canonical /hives path (main) by @azchu in https://github.com/NeoHiveAI/MemVec/pull/176
+* hotfix: [HIVE-453] Let the repo pickers search every repo and add one by URL (main) by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/261
+* [HIVE-421] Cross-project hive sharing by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/149
+* feat(frontend): replace in-app Guides with external docs link (main) by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/231
+* fix(frontend): add pointer cursor, hover and focus states to buttons by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/232
+* hotfix: [HIVE-478] Update CI job to deploy prod and staging instances on respective machines (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/264
+* fix(ci): :bug: keep sigma's Docker disk from filling up by @Nader-Awad in https://github.com/NeoHiveAI/MemVec/pull/268
+* hotfix: run the deploy matrix only on manual dispatch (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/283
+* hotfix: [HIVE-478] Refuse matching staging and production runner labels, name both hosts in Slack, and deploy staging as a dev build (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/274
+* hotfix: [HIVE-532] Publish the metal worker with the release version in its VERSION file (main) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/288
+* hotfix: [HIVE-420] Retire the post-merge tests workflow and group CI by lifecycle stage by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/201
+* [HIVE-597] Save the dashboard's Claude Code server to project scope so automatic recall works by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/292
+* [HIVE-604] Fix the getting-started skill's claude mcp add command and save it at project scope by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/295
+* [HIVE-601] Apply the repository's Allowlist and Blocklist in the webhook refresh endpoint by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/294
+* [HIVE-599] Remove files from the Index when the Allowlist or Blocklist no longer allows them by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/296
+* [HIVE-614] make the branch picker searchable and keep it on screen by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/297
+* [HIVE-619] Playground dev only by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/298
+* [HIVE-454] Move the Hive and Index page banners onto one StatusBanner and reword the missing-branch message by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/287
+* [HIVE-638] Re-embed no longer skips memories that time out by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/300
+* Show re-embed history on the index page by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/301
+* feat(chunker): convert PDFs via the docling CLI and remove all Python [HIVE-471] by @deanmcgregor in https://github.com/NeoHiveAI/MemVec/pull/243
+* feat(uploads): support docx, xlsx and pptx [HIVE-472] by @deanmcgregor in https://github.com/NeoHiveAI/MemVec/pull/244
+* refactor(chunker): git provenance is its own context [HIVE-530] by @deanmcgregor in https://github.com/NeoHiveAI/MemVec/pull/266
+* feat(uploads): asynchronous batched document import [HIVE-473] by @deanmcgregor in https://github.com/NeoHiveAI/MemVec/pull/245
+* feat(entrypoint): supervise processes with s6-overlay [HIVE-592] by @deanmcgregor in https://github.com/NeoHiveAI/MemVec/pull/286
+* feat(uploads): OCR scanned pages and accept png and jpeg [HIVE-529] by @deanmcgregor in https://github.com/NeoHiveAI/MemVec/pull/263
+* tests: helper scripts for manual testing (Roshel's tests) by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/234
+* tests: helper scripts for manual tests (Alice's tests) by @azchu in https://github.com/NeoHiveAI/MemVec/pull/251
+* tests: helper scripts for manual tests (Nick's tests) by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/293
+* [HIVE-691] a corrupted Index is invisible to recall and to health by @azchu in https://github.com/NeoHiveAI/MemVec/pull/305
+* [HIVE-468] Restore the published installer as the manual install test default by @Rgonzales4 in https://github.com/NeoHiveAI/MemVec/pull/306
+* test(manual-testing): add the MAN-UPLOAD-04 worker fault helper by @deanmcgregor in https://github.com/NeoHiveAI/MemVec/pull/313
+* [HIVE-858] Remove Hive Start, Stop, and Restart from the UI and API by @YEADOS in https://github.com/NeoHiveAI/MemVec/pull/308
+* HIVE-434 (1/5): chunk/embed queue design by @MannyKv in https://github.com/NeoHiveAI/MemVec/pull/246
+* HIVE-434 (2/5): split chunking and embedding over a queue by @MannyKv in https://github.com/NeoHiveAI/MemVec/pull/247
+* HIVE-434 (3/5): handle failed embed batches by @MannyKv in https://github.com/NeoHiveAI/MemVec/pull/248
+* HIVE-434 (4/5): hold sync runs until vectors land by @MannyKv in https://github.com/NeoHiveAI/MemVec/pull/249
+* HIVE-434 (5/5): drop queued work on cancel by @MannyKv in https://github.com/NeoHiveAI/MemVec/pull/250
+
+
+**Full Changelog**: https://github.com/NeoHiveAI/MemVec/compare/v1.6.0...v1.8.0
+
+
 ## v1.7.0 (2026-09-22)
 
 ## What's Changed

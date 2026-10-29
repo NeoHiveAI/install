@@ -21,15 +21,22 @@
 #                                even when the cached key is present
 #   NEOHIVE_UPDATE_REPO        - override the Docker Hub repo for in-app update
 #                                checks (default: neohivedev/neohive)
-#   NEOHIVE_PDF_BRIDGE_TIMEOUT_MS  - docling PDF bridge per-document timeout in ms
+#   NEOHIVE_DOCUMENT_TIMEOUT_MS    - per-document conversion timeout in ms
 #                                    (default 300000 = 5 min). Raise this for very
 #                                    large PDFs - a 900-page document can need
 #                                    25-30 minutes. Example: 1800000 (30 min).
-#                                    Forwarded as MEMVEC_PDF_BRIDGE_TIMEOUT_MS.
-#   NEOHIVE_PDF_WARMUP_TIMEOUT_MS  - docling model-warmup timeout in ms (default
-#                                    300000 = 5 min). Raise this on first-boot
-#                                    hosts that pay a slow HuggingFace download.
-#                                    Forwarded as MEMVEC_PDF_WARMUP_TIMEOUT_MS.
+#                                    Forwarded as MEMVEC_DOCUMENT_TIMEOUT_MS.
+#   NEOHIVE_PDF_BRIDGE_TIMEOUT_MS  - the former name for the above, from when the
+#                                    converter was a Python bridge. Still honoured,
+#                                    so an upgrade does not quietly reset an
+#                                    override back to the 5 min default;
+#                                    NEOHIVE_DOCUMENT_TIMEOUT_MS wins when both are
+#                                    set. Forwarded as MEMVEC_PDF_BRIDGE_TIMEOUT_MS,
+#                                    which the converter reads as a fallback.
+#   NEOHIVE_PDF_WARMUP_TIMEOUT_MS  - gone, with no replacement. The image downloads
+#                                    the document models at build time, so the
+#                                    first upload waits for nothing and there is
+#                                    no warmup left to bound.
 #   NEOHIVE_CHUNKER_TIMEOUT_MS     - markdown/code chunker subprocess timeout in
 #                                    ms (default 30000). Distinct from the PDF
 #                                    bridge timeout above - this gates the
@@ -136,11 +143,11 @@ fi
 print_banner() {
   # shellcheck disable=SC2028  # intentional ANSI escape sequences in printf
   printf '\n'
-  printf '    %s __%s         %s _   _            _   _ _%s\n'          "$C_VIOLET"  "$C_RESET" "$C_BOLD" "$C_RESET"
+  printf '    %s __%s        %s _   _            _   _ _%s\n'          "$C_VIOLET"  "$C_RESET" "$C_BOLD" "$C_RESET"
   printf '    %s/  \\%s%s__%s     %s| \\ | | ___  ___ | | | (_)_   _____%s\n'   "$C_VIOLET" "$C_RESET" "$C_LAVENDER" "$C_RESET" "$C_BOLD" "$C_RESET"
   printf '    %s\\__/%s%s  \\%s    %s|  \\| |/ _ \\/ _ \\| |_| | \\ \\ / / _ \\%s\n' "$C_VIOLET" "$C_RESET" "$C_LAVENDER" "$C_RESET" "$C_BOLD" "$C_RESET"
   printf '    %s/  \\%s%s__/%s    %s| |\\  |  __/ (_) |  _  | |\\ V /  __/%s\n'   "$C_ORCHID" "$C_RESET" "$C_LAVENDER" "$C_RESET" "$C_BOLD" "$C_RESET"
-  printf '    %s\\__/%s         %s|_| \\_|\\___|\\___/|_| |_|_| \\_/ \\___|%s\n' "$C_ORCHID" "$C_RESET" "$C_BOLD" "$C_RESET"
+  printf '    %s\\__/%s       %s|_| \\_|\\___|\\___/|_| |_|_| \\_/ \\___|%s\n' "$C_ORCHID" "$C_RESET" "$C_BOLD" "$C_RESET"
   printf '\n'
   printf '    %sSemantic Memory Platform%s\n'       "$C_DIM" "$C_RESET"
   printf '    %s=========================%s\n\n'     "$C_DIM" "$C_RESET"
@@ -178,6 +185,16 @@ fail() {
   exit 1
 }
 
+# -- JSON field reads -------------------------------------------------
+# The gateway sends null for a field that does not apply, such as
+# graceHoursRemaining outside grace.
+json_str() {  # json_str <json> <key>
+  echo "$1" | grep -oE "\"$2\":\"[^\"]*\"" | head -n1 | cut -d'"' -f4 || true
+}
+json_num() {  # json_num <json> <key>
+  echo "$1" | grep -oE "\"$2\":-?[0-9]+(\.[0-9]+)?" | head -n1 | cut -d':' -f2 || true
+}
+
 # -- LAN IP detection -------------------------------------------------
 # Best-effort: returns the primary non-loopback IPv4 so users installing
 # on a remote/shared box (not their laptop) know which address to open
@@ -200,6 +217,60 @@ detect_lan_ip() {
       ;;
   esac
   printf '%s' "$ip"
+}
+
+# Query the gateway's /api/license/status once it is up. Best-effort:
+# if the endpoint cannot be reached or fields are missing, just skip
+# the line - the install itself already succeeded.
+print_license_summary() {
+  local status mode expires holder days grace_remaining grace_total attempts=0
+  while [ $attempts -lt 15 ]; do
+    if status="$(curl -sSf -m 2 "http://localhost:$PORT/api/license/status" 2>/dev/null)"; then
+      mode=$(json_str "$status" status)
+      expires=$(json_str "$status" expiresAt)
+      holder=$(json_str "$status" holderName)
+      days=$(json_num "$status" daysRemaining)
+      grace_remaining=$(json_num "$status" graceHoursRemaining)
+      grace_total=$(json_num "$status" graceHoursTotal)
+      printf '      License: %s' "${mode:-unknown}"
+      if [ -n "$expires" ] && [ -n "$days" ]; then
+        printf ' (expires %s, %s days)' "$expires" "$days"
+      elif [ -n "$expires" ]; then
+        printf ' (expires %s)' "$expires"
+      fi
+      [ -n "$holder" ] && printf ' - %s' "$holder"
+      printf '\n'
+      if [ "$mode" = "grace" ]; then
+        print_grace_banner "${grace_remaining:-?}" "${grace_total:-?}"
+      fi
+      return
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  warn "Could not query license status from server"
+}
+
+# Loud banner shown only when the gateway came up in offline-grace mode -
+# preflight passed (or was tolerated) but the runtime activation call to
+# api.keygen.sh failed, so the container is serving on cached state.
+# Operator-facing: business users see the dashboard banner / bottom-right
+# notification, but the person running the installer needs to know now.
+print_grace_banner() {
+  local remaining="$1" total="$2"
+  local bar
+  bar=$(printf '%*s' 67 '' | tr ' ' '=')
+  printf '\n   %s%s%s%s\n' "$C_BOLD" "$C_RED" "$bar" "$C_RESET"
+  printf '   %s%s  ! OFFLINE GRACE MODE  !%s\n' "$C_BOLD" "$C_RED" "$C_RESET"
+  printf '   %s%s%s\n' "$C_RED" "$bar" "$C_RESET"
+  printf '   Could not reach and validate with licensing during activation.\n'
+  printf '   Running on cached license state. %s%s~%sh of %sh remaining%s\n' \
+    "$C_BOLD" "$C_RED" "${remaining}" "${total}" "$C_RESET"
+  printf '   before the server stops serving requests.\n\n'
+  printf '     - check internet access, firewall, or proxy settings\n'
+  printf '     - if connectivity looks fine, %sverify your license has\n' "$C_BOLD"
+  printf '       not expired%s\n' "$C_RESET"
+  printf '   %s%s%s\n\n' "$C_RED" "$bar" "$C_RESET"
 }
 
 # -- Post-install summary ---------------------------------------------
@@ -231,7 +302,7 @@ print_post_install() {
   printf '   %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
   printf '   %sReference%s\n\n' "$C_BOLD" "$C_RESET"
   printf '     MCP endpoint:   %shttp://localhost:%s/hives/<hive-id>/mcp%s\n' "$C_CYAN" "$PORT" "$C_RESET"
-  printf '                     (the <hive-id> is shown on the hive detail page)\n\n'
+  printf '                     (the <hive-id> is shown on the Hive detail page)\n\n'
   printf '     HTTPS/remote:   wrap the endpoint with the %smcp-remote%s npm\n' "$C_BOLD" "$C_RESET"
   printf '                     package on the client (copy-paste command is\n'
   printf '                     shown in the dashboard).\n\n'
@@ -514,7 +585,7 @@ read_license_file() {
         key="$(printf '%s' "$raw" | jq -r '.key // .license_key // empty' 2>/dev/null || true)"
       fi
       if [ -z "$key" ]; then
-        key="$(printf '%s' "$raw" | grep -oE '"(license_)?key"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"$/\1/')"
+        key="$(printf '%s' "$raw" | grep -oE '"(license_)?key"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"$/\1/' || true)"
       fi
       [ -n "$key" ] || fail E306 "License file '$path' is JSON but no .key field found."
       ;;
@@ -770,14 +841,14 @@ preflight_validate_license() {
   fi
 
   if [ "$status" -ge 400 ] && [ "$status" -lt 500 ] 2>/dev/null; then
-    detail=$(echo "$body" | grep -oE '"detail":"[^"]*"' | head -n1 | cut -d'"' -f4)
+    detail=$(json_str "$body" detail)
     rm -f "$LICENSE_CACHE_FILE"
     warn "License rejected by Keygen (HTTP $status): ${detail:-unknown}"
     return 1
   fi
 
   if echo "$body" | grep -qE '"code":"VALID"'; then
-    detail=$(echo "$body" | grep -oE '"detail":"[^"]*"' | head -n1 | cut -d'"' -f4)
+    detail=$(json_str "$body" detail)
     ok "${detail:-license accepted}"
     return 0
   fi
@@ -791,7 +862,7 @@ preflight_validate_license() {
     return 0
   fi
 
-  detail=$(echo "$body" | grep -oE '"detail":"[^"]*"' | head -n1 | cut -d'"' -f4)
+  detail=$(json_str "$body" detail)
   rm -f "$LICENSE_CACHE_FILE"
   warn "License rejected by Keygen: ${detail:-unknown}"
   return 1
@@ -847,12 +918,27 @@ bootstrap_launch_agent() {
       launchctl kickstart "gui/$(id -u)/$label" >/dev/null 2>&1 || true
       return 0
     fi
+    # Only the teardown race earns a retry: launchd answers it with error 5
+    # while it is still unloading the agent this install just booted out.
+    # Anything else, a malformed plist or a program that cannot execute,
+    # fails identically on every attempt, so surface it on the first.
+    case "$err" in
+      *'Bootstrap failed: 5:'*) ;;
+      *)
+        printf '%s' "$err"
+        return 1
+        ;;
+    esac
     attempt=$((attempt + 1))
-    if [ "$attempt" -ge 5 ]; then
+    if [ "$attempt" -ge 7 ]; then
       printf '%s' "$err"
       return 1
     fi
-    sleep 1
+    # 1+2+4+8+16+32s, about a minute, in line with the 60s /health wait and
+    # the 90s worker health budget. Five flat seconds lost this race on a
+    # churned machine while the same command succeeded moments later, and a
+    # lost race is a permanent downgrade to in-container CPU embedding.
+    sleep $((1 << (attempt - 1)))
   done
 }
 
@@ -932,6 +1018,22 @@ metal_worker_health_ok() {
     return 1
   fi
   return 0
+}
+
+# Removes the existing container before an upgrade starts the new one on the
+# same volume. `docker stop` asks the server to shut down first, which frees its
+# licence seat and stops its scheduled jobs. The image gives the server about 8
+# seconds to do that, so a sync still running after that is cut off, as it was
+# before. If the container has not exited after STOP_TIMEOUT_SECONDS, Docker
+# kills it and the `rm -f` below removes it, so a server that hangs on shutdown
+# still gets replaced.
+STOP_TIMEOUT_SECONDS=30
+replace_existing_container() {
+  if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    info "Stopping existing container for upgrade..."
+    docker stop --time "$STOP_TIMEOUT_SECONDS" "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker rm -f "$CONTAINER_NAME" >/dev/null
+  fi
 }
 
 # ----------------------------------------------------------------------
@@ -1118,10 +1220,7 @@ if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
   IS_UPDATE=1
 fi
 step 7 "Starting NeoHive server..."
-if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-  info "Stopping existing container for upgrade..."
-  docker rm -f "$CONTAINER_NAME" >/dev/null
-fi
+replace_existing_container
 RUN_ARGS=(
   -d
   --name "$CONTAINER_NAME"
@@ -1165,9 +1264,25 @@ forward_timeout_env() {
   info "${container_var} override: ${value}ms"
   RUN_ARGS+=(-e "${container_var}=${value}")
 }
+forward_timeout_env NEOHIVE_DOCUMENT_TIMEOUT_MS   MEMVEC_DOCUMENT_TIMEOUT_MS
+# The former spelling of the same knob. Forwarded under its old container name,
+# which the converter still reads as a fallback, so a customer who raised it for
+# large PDFs keeps that setting across the upgrade.
 forward_timeout_env NEOHIVE_PDF_BRIDGE_TIMEOUT_MS MEMVEC_PDF_BRIDGE_TIMEOUT_MS
-forward_timeout_env NEOHIVE_PDF_WARMUP_TIMEOUT_MS MEMVEC_PDF_WARMUP_TIMEOUT_MS
 forward_timeout_env NEOHIVE_CHUNKER_TIMEOUT_MS    MEMVEC_CHUNKER_TIMEOUT_MS
+
+# NEOHIVE_PDF_BRIDGE_TIMEOUT_MS still works, so this nudges rather than warns:
+# the setting is applied, it just has a better name now.
+if [ -n "${NEOHIVE_PDF_BRIDGE_TIMEOUT_MS:-}" ]; then
+  info "NEOHIVE_PDF_BRIDGE_TIMEOUT_MS is the old name for NEOHIVE_DOCUMENT_TIMEOUT_MS and is still applied. Rename it when convenient."
+fi
+
+# The warmup timeout has no successor: the image downloads the document models at
+# build time, so there is no warmup left to bound. A customer who raised it is
+# told, rather than left with a setting that stopped applying without saying so.
+if [ -n "${NEOHIVE_PDF_WARMUP_TIMEOUT_MS:-}" ]; then
+  warn "NEOHIVE_PDF_WARMUP_TIMEOUT_MS is no longer used: the image ships the document models, so the first upload downloads nothing."
+fi
 
 # ── macOS Metal embedding worker (Apple Silicon only) ────────────────
 # Linux VMs on macOS cannot reach the GPU, so in-container embedding is
@@ -1368,55 +1483,6 @@ fi
 ELAPSED=$(( $(date +%s) - START ))
 ok "ready in ${ELAPSED}s"
 
-# Query the gateway's /api/license/status once it is up. Best-effort:
-# if the endpoint cannot be reached or fields are missing, just skip
-# the line - the install itself already succeeded.
-print_license_summary() {
-  local status mode expires holder days grace_remaining grace_total attempts=0
-  while [ $attempts -lt 15 ]; do
-    if status="$(curl -sSf -m 2 "http://localhost:$PORT/api/license/status" 2>/dev/null)"; then
-      mode=$(echo "$status" | grep -oE '"status":"[^"]+"' | head -n1 | cut -d'"' -f4)
-      expires=$(echo "$status" | grep -oE '"expiresAt":"[^"]+"' | head -n1 | cut -d'"' -f4)
-      holder=$(echo "$status" | grep -oE '"holderName":"[^"]+"' | head -n1 | cut -d'"' -f4)
-      days=$(echo "$status" | grep -oE '"daysRemaining":-?[0-9]+' | head -n1 | cut -d':' -f2)
-      grace_remaining=$(echo "$status" | grep -oE '"graceHoursRemaining":-?[0-9]+(\.[0-9]+)?' | head -n1 | cut -d':' -f2)
-      grace_total=$(echo "$status" | grep -oE '"graceHoursTotal":[0-9]+' | head -n1 | cut -d':' -f2)
-      printf '      License: %s' "${mode:-unknown}"
-      [ -n "$expires" ] && printf ' (expires %s, %s days)' "$expires" "$days"
-      [ -n "$holder" ] && printf ' - %s' "$holder"
-      printf '\n'
-      if [ "$mode" = "grace" ]; then
-        print_grace_banner "${grace_remaining:-?}" "${grace_total:-?}"
-      fi
-      return
-    fi
-    attempts=$((attempts + 1))
-    sleep 2
-  done
-  warn "Could not query license status from server"
-}
-
-# Loud banner shown only when the gateway came up in offline-grace mode -
-# preflight passed (or was tolerated) but the runtime activation call to
-# api.keygen.sh failed, so the container is serving on cached state.
-# Operator-facing: business users see the dashboard banner / bottom-right
-# notification, but the person running the installer needs to know now.
-print_grace_banner() {
-  local remaining="$1" total="$2"
-  local bar
-  bar=$(printf '%*s' 67 '' | tr ' ' '=')
-  printf '\n   %s%s%s%s\n' "$C_BOLD" "$C_RED" "$bar" "$C_RESET"
-  printf '   %s%s  ! OFFLINE GRACE MODE  !%s\n' "$C_BOLD" "$C_RED" "$C_RESET"
-  printf '   %s%s%s\n' "$C_RED" "$bar" "$C_RESET"
-  printf '   Could not reach and validate with licensing during activation.\n'
-  printf '   Running on cached license state. %s%s~%sh of %sh remaining%s\n' \
-    "$C_BOLD" "$C_RED" "${remaining}" "${total}" "$C_RESET"
-  printf '   before the server stops serving requests.\n\n'
-  printf '     - check internet access, firewall, or proxy settings\n'
-  printf '     - if connectivity looks fine, %sverify your license has\n' "$C_BOLD"
-  printf '       not expired%s\n' "$C_RESET"
-  printf '   %s%s%s\n\n' "$C_RED" "$bar" "$C_RESET"
-}
 print_license_summary
 
 # Which embedding path the install landed on. METAL_WORKER_ENABLED is set only

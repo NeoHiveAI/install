@@ -67,6 +67,10 @@ jobs:
               run: bash test/launch-agent.sh
             - name: Metal-worker health probe
               run: bash test/metal-worker-probe.sh
+            - name: Upgrade stops the old container before removing it
+              run: bash test/upgrade-stop.sh
+            - name: Licence field reads tolerate null and absent
+              run: bash test/license-summary.sh
 
     ops-tests:
         # uninstall.sh / backup.sh / logs.sh against PATH shims for docker,
